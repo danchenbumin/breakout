@@ -1,0 +1,17 @@
+# 编译生成的可执行文件/中间文件
+game
+main
+*.o
+*.out
+*.exe
+
+# VSCode配置（只保留核心编译配置）
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# 临时/日志/缓存文件
+*.tmp
+*.log
+*~
+.DS_Store
