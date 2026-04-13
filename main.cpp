@@ -53,11 +53,7 @@ int main() {
     CloseWindow();
     return 0;
 } */
-<<<<<<< HEAD
 /* #include "raylib.h"
-=======
-#include "raylib.h"
->>>>>>> b944724345d279076ab6b6a71e2e5e0df864e362
 #include "Ball.h"
 #include "Paddle.h"
 #include "Brick.h"
@@ -203,7 +199,6 @@ int main() {
     // 4. 游戏收尾
     CloseWindow();
     return 0;
-<<<<<<< HEAD
 } */
 // main.cpp 精简后
 #include "raylib.h"
@@ -230,6 +225,4 @@ int main() {
     game.Shutdown();
     CloseWindow();
     return 0;
-=======
->>>>>>> b944724345d279076ab6b6a71e2e5e0df864e362
 }
