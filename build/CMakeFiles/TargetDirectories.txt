@@ -1,0 +1,3 @@
+/mnt/d/Linux c++ class code/ubuntu/week2_template/week2_template/build/CMakeFiles/breakout_week2.dir
+/mnt/d/Linux c++ class code/ubuntu/week2_template/week2_template/build/CMakeFiles/edit_cache.dir
+/mnt/d/Linux c++ class code/ubuntu/week2_template/week2_template/build/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,38 @@
+{
+    "window": {
+        "width": 800,
+        "height": 600,
+        "title": "Breakout - Enhanced Edition"
+    },
+    "game": {
+        "initialLives": 3,
+        "scorePerBrick": 10
+    },
+    "ball": {
+        "radius": 10,
+        "baseSpeed": 200
+    },
+    "paddle": {
+        "width": 100,
+        "height": 20,
+        "speed": 300
+    },
+    "powerups": {
+        "dropRate": 0.3,
+        "paddleExtend": {
+            "extraWidth": 40,
+            "duration": 5
+        },
+        "multiBall": {
+            "extraBalls": 2
+        },
+        "slowBall": {
+            "speedFactor": 0.5,
+            "duration": 5
+        }
+    },
+    "particles": {
+        "brickBreakCount": 10,
+        "lifeTime": 0.5
+    }
+}

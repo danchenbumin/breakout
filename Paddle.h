@@ -19,13 +19,14 @@ public:
 
 class Paddle {
 public:
-    Rectangle rect;  // 球拍的矩形（位置+尺寸）
+    Rectangle rect;
+    float originalWidth; // 原始宽度
+    float effectRemainingTime; // 效果剩余时间
 
-    // 构造函数
-    Paddle(float x, float y, float w, float h);
-
-    // 成员函数
-    void Draw();               // 绘制球拍
-    void MoveLeft(float speed); // 向左移动
-    void MoveRight(float speed);// 向右移动
+    Paddle(float x, float y, float width, float height);
+    void Draw() const;
+    void MoveLeft(float speed);
+    void MoveRight(float speed);
+    void Extend(float extraWidth, float duration);
+    void Update(float dt);
 };

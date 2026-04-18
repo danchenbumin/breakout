@@ -30,6 +30,6 @@ public:
 
     // 成员函数
     void Move();               // 移动球
-    void Draw();               // 绘制球
+    void Draw() const;         // 绘制球（新增const）
     void BounceEdge(int screenWidth, int screenHeight); // 边界反弹（调整：底边界不反弹，用于触发失败）
 };

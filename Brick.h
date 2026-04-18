@@ -20,12 +20,11 @@ public:
 
 class Brick {
 public:
-    Rectangle rect;  // 砖块的矩形（位置+尺寸）
-    bool active;     // 砖块是否激活（显示/可碰撞）
+    Rectangle rect;
+    bool active;
+    Color color; // 新增：砖块颜色
 
-    // 构造函数
-    Brick(float x, float y, float w, float h);
-
-    // 成员函数
-    void Draw(); // 绘制砖块
+    Brick(float x, float y, float width, float height);
+    Brick(float x, float y, float width, float height, Color color); // 带颜色的构造函数
+    void Draw();
 };

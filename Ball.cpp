@@ -54,7 +54,7 @@ void Ball::Move() {
     position.y += speed.y;
 }
 
-void Ball::Draw() {
+void Ball::Draw() const { // 新增const
     DrawCircleV(position, radius, RED);
 }
 
