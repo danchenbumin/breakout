@@ -1,228 +1,532 @@
-/* #include "raylib.h"
-#include "Ball.h"
-#include "Paddle.h"
-#include "Brick.h"
+#include <iostream>
 #include <vector>
+#include <cmath>
+#include <random>
+#include <enet/enet.h>
+#include "raylib.h"
+using namespace std;
 
-int main() {
-    const int screenWidth = 800;
-    const int screenHeight = 600;
-    InitWindow(screenWidth, screenHeight, "打砖块2D - 第二周");
+// 强制1字节对齐
+#pragma pack(1)
+struct GameState {
+    float ballX, ballY;
+    float ballSpeedX, ballSpeedY;
+    float paddle1X; // 主机的下板
+    float paddle2X; // 客户端的上板
+    int score;
+    int lives;
+    bool gameOver;
+    bool victory;
+    // 道具同步状态
+    bool powerUpActive;
+    float powerUpX, powerUpY;
+    int powerUpType; // 1=加宽 2=加速 3=生命
+};
+#pragma pack()
 
-    // 创建游戏对象
-    Ball ball({400, 300}, {2, 2}, 10);
-    Paddle paddle(350, 550, 100, 20);
+struct Snapshot {
+    GameState state;
+    double timestamp;
+};
 
-    // 创建砖块（示例：一排5个）
-    std::vector<Brick> bricks;
-    float brickWidth = 100;
-    float brickHeight = 30;
-    for (int i = 0; i < 8; i++) {
-        bricks.emplace_back(50 + i * 120, 100, brickWidth, brickHeight);
+// 粒子结构体
+struct Particle {
+    Vector2 position;
+    Vector2 velocity;
+    Color color;
+    float life;
+    float maxLife;
+};
+
+// 基础游戏对象类
+class GameObject {
+public:
+    GameObject(Vector2 pos = {0, 0}) : position(pos) {}
+    Vector2 position;
+};
+
+class PhysicalObject : virtual public GameObject {
+public:
+    PhysicalObject(Vector2 pos = {0, 0}, Vector2 vel = {0, 0}, float r = 0)
+        : GameObject(pos), velocity(vel), radius(r) {}
+    Vector2 velocity;
+    float radius;
+
+    void Move() {
+        position.x += velocity.x;
+        position.y += velocity.y;
     }
 
-    // 绘制左右墙为灰色矩形
-    DrawRectangle(0, 0, 5, screenHeight, GRAY);   // 左墙宽5像素
-    DrawRectangle(screenWidth-5, 0, 5, screenHeight, GRAY); // 右墙
-    // 绘制天花板和地板
-    DrawRectangle(0, 0, screenWidth, 5, GRAY);    // 顶墙高5像素
-    DrawRectangle(0, screenHeight-5, screenWidth, 5, GRAY); // 底墙
+    void BounceEdge(int screenWidth, int screenHeight) {
+        if (position.x - radius <= 5 || position.x + radius >= screenWidth - 5) {
+            velocity.x *= -1;
+        }
+        if (position.y - radius <= 5) {
+            velocity.y *= -1;
+        }
+    }
+};
 
-    SetTargetFPS(60);
+class VisualObject : virtual public GameObject {
+public:
+    VisualObject(Vector2 pos = {0, 0}, Color c = WHITE, bool vis = true)
+        : GameObject(pos), color(c), visible(vis) {}
+    Color color;
+    bool visible;
+    virtual void Draw() const = 0;
+};
 
-    while (!WindowShouldClose()) {
-        // 更新
-        ball.Move();
-        ball.BounceEdge(screenWidth, screenHeight);
+class Ball : public PhysicalObject, public VisualObject {
+public:
+    Ball(Vector2 pos = {400, 300}, Vector2 vel = {3, -3}, float r = 10, Color c = RED)
+        : GameObject(pos), PhysicalObject(pos, vel, r), VisualObject(pos, c, true) {}
 
-        // 板移动
-        if (IsKeyDown(KEY_LEFT)) paddle.MoveLeft(5);
-        if (IsKeyDown(KEY_RIGHT)) paddle.MoveRight(5);
+    void Draw() const override {
+        if (visible) DrawCircleV(position, radius, color);
+    }
+};
 
-        // 绘制
-        BeginDrawing();
-        ClearBackground(RAYWHITE);
+class Paddle : public PhysicalObject, public VisualObject {
+public:
+    Paddle(Vector2 pos = {0, 0}, float w = 100, float h = 20, Color c = BLUE)
+        : GameObject(pos), PhysicalObject(pos, {0, 0}, 0), VisualObject(pos, c, true),
+          width(w), height(h), originalWidth(w) {}
 
-        ball.Draw();
-        paddle.Draw();
-        for (auto& brick : bricks) brick.Draw();
+    float width;
+    float height;  // 补上了height！
+    float originalWidth;
 
-        EndDrawing();
+    void MoveLeft(float speed) {
+        position.x -= speed;
+        if (position.x < 5) position.x = 5;
     }
 
-    CloseWindow();
-    return 0;
-} */
-/* #include "raylib.h"
-#include "Ball.h"
-#include "Paddle.h"
-#include "Brick.h"
-#include <vector>
+    void MoveRight(float speed) {
+        position.x += speed;
+        if (position.x + width > 795) position.x = 795 - width;
+    }
 
-// 重置游戏状态（重新开始时调用）
-void ResetGame(Ball& ball, Paddle& paddle, std::vector<Brick>& bricks) {
-    // 重置球的位置和速度
-    ball.position = {400, 300};
-    ball.speed = {2, 2};
-    // 重置球拍位置
-    paddle.rect = {350, 550, 100, 20};
-    // 重置砖块（全部激活）
-    float brickWidth = 100;
-    float brickHeight = 30;
+    void ResetWidth() {
+        width = originalWidth;
+    }
+
+    void Widen() {
+        width = originalWidth * 1.5f;
+    }
+
+    void Draw() const override {
+        if (visible) DrawRectangle(position.x, position.y, width, height, color);
+    }
+};
+
+class Brick : public PhysicalObject, public VisualObject {
+public:
+    Brick(Vector2 pos = {0, 0}, float w = 85, float h = 25, Color c = BLUE)
+        : GameObject(pos), PhysicalObject(pos, {0, 0}, 0), VisualObject(pos, c, true),
+          width(w), height(h), active(true), hits(1) {}
+
+    float width;
+    float height;
+    bool active;
+    int hits;
+
+    void Draw() const override {
+        if (visible && active) {
+            DrawRectangle(position.x, position.y, width, height, color);
+            DrawRectangleLines(position.x, position.y, width, height, WHITE);
+        }
+    }
+};
+
+// 道具类
+class PowerUp : public PhysicalObject, public VisualObject {
+public:
+    PowerUp(Vector2 pos, int type) : PhysicalObject(pos, {0, 2}, 15), 
+        VisualObject(pos, WHITE, true), type(type), active(true) {
+        if (type == 1) color = PURPLE; // 加宽
+        else if (type == 2) color = YELLOW; // 加速
+        else if (type == 3) color = GREEN; // 生命
+    }
+
+    int type;
+    bool active;
+
+    void Update() {
+        Move();
+    }
+
+    void Draw() const override {
+        if (active && visible) {
+            DrawCircleV(position, radius, color);
+            DrawText(type == 1 ? "W" : type == 2 ? "S" : "+", position.x-5, position.y-5, 12, WHITE);
+        }
+    }
+};
+
+// 全局变量
+const int SCREEN_WIDTH = 800;
+const int SCREEN_HEIGHT = 600;
+const int PORT = 12345;
+const float NETWORK_TICK_RATE = 1.0f / 30.0f;
+
+bool isHost = false;
+ENetHost* host = nullptr;
+ENetPeer* peer = nullptr;
+
+GameState currentState;
+Snapshot lastSnapshot, nextSnapshot;
+double lastNetworkTime = 0.0f;
+
+vector<Brick> bricks;
+vector<Particle> particles;
+Ball ball({400, 300}, {3, -3}, 10, RED);
+Paddle paddle1({350, 550}, 100, 20, BLUE);
+Paddle paddle2({350, 30}, 100, 20, GREEN);
+PowerUp* powerUp = nullptr;
+
+mt19937 rng(random_device{}());
+
+// 创建粒子特效
+void CreateParticles(Vector2 pos, Color color, int count) {
+    uniform_real_distribution<float> dist(-3, 3);
+    for (int i = 0; i < count; i++) {
+        Particle p;
+        p.position = pos;
+        p.velocity = {dist(rng), dist(rng)};
+        p.color = color;
+        p.life = 1.0f;
+        p.maxLife = 1.0f;
+        particles.push_back(p);
+    }
+}
+
+// 更新粒子
+void UpdateParticles(float dt) {
+    for (auto it = particles.begin(); it != particles.end();) {
+        it->position.x += it->velocity.x;
+        it->position.y += it->velocity.y;
+        it->life -= dt;
+        if (it->life <= 0) {
+            it = particles.erase(it);
+        } else {
+            it++;
+        }
+    }
+}
+
+// 绘制粒子
+void DrawParticles() {
+    for (const auto& p : particles) {
+        float alpha = p.life / p.maxLife;
+        DrawCircleV(p.position, 3, Color{p.color.r, p.color.g, p.color.b, (unsigned char)(alpha * 255)});
+    }
+}
+
+void InitBricks() {
     bricks.clear();
-    for (int i = 0; i < 8; i++) {
-        bricks.emplace_back(50 + i * 120, 100, brickWidth, brickHeight);
+    Color colors[5] = {RED, ORANGE, YELLOW, GREEN, BLUE};
+    for (int row = 0; row < 5; row++) {
+        for (int col = 0; col < 8; col++) {
+            bricks.emplace_back(Vector2{50.0f + col * 90.0f, 100.0f + row * 35.0f}, 85, 25, colors[row]);
+        }
+    }
+}
+
+void ResetGame() {
+    InitBricks();
+    ball.position = {400, 300};
+    ball.velocity = {3, -3};
+    paddle1.position = {350, 550};
+    paddle1.ResetWidth();
+    paddle2.position = {350, 30};
+    paddle2.ResetWidth();
+    if (powerUp) { delete powerUp; powerUp = nullptr; }
+    particles.clear();
+    currentState.score = 0;
+    currentState.lives = 3;
+    currentState.gameOver = false;
+    currentState.victory = false;
+    currentState.powerUpActive = false;
+}
+
+void UpdateHostLogic() {
+    float dt = GetFrameTime();
+    if (IsKeyDown(KEY_A)) paddle1.MoveLeft(5.0f);
+    if (IsKeyDown(KEY_D)) paddle1.MoveRight(5.0f);
+
+    ball.Move();
+    ball.BounceEdge(SCREEN_WIDTH, SCREEN_HEIGHT);
+
+    if (CheckCollisionCircleRec(ball.position, ball.radius,
+        {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
+        ball.velocity.y = -fabs(ball.velocity.y);
+        ball.position.y = paddle1.position.y - ball.radius - 1;
+        CreateParticles(ball.position, BLUE, 5);
+    }
+
+    if (CheckCollisionCircleRec(ball.position, ball.radius,
+        {paddle2.position.x, paddle2.position.y, paddle2.width, paddle2.height})) {
+        ball.velocity.y = fabs(ball.velocity.y);
+        ball.position.y = paddle2.position.y + paddle2.height + ball.radius + 1;
+        CreateParticles(ball.position, GREEN, 5);
+    }
+
+    for (auto& brick : bricks) {
+        if (brick.active && CheckCollisionCircleRec(ball.position, ball.radius,
+            {brick.position.x, brick.position.y, brick.width, brick.height})) {
+            brick.active = false;
+            currentState.score += 10;
+            ball.velocity.y *= -1;
+            CreateParticles(brick.position, brick.color, 10);
+            
+            // 随机掉落道具
+            uniform_int_distribution<int> dist(1, 5);
+            if (dist(rng) == 1 && !powerUp) {
+                uniform_int_distribution<int> typeDist(1, 3);
+                powerUp = new PowerUp(brick.position, typeDist(rng));
+            }
+            break;
+        }
+    }
+
+    // 更新道具
+    if (powerUp && powerUp->active) {
+        powerUp->Update();
+        // 检测道具碰撞
+        if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
+            {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
+            // 主机吃到道具
+            if (powerUp->type == 1) paddle1.Widen();
+            else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
+            else if (powerUp->type == 3) currentState.lives++;
+            powerUp->active = false;
+            CreateParticles(powerUp->position, powerUp->color, 15);
+            powerUp = nullptr;
+        } else if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
+            {paddle2.position.x, paddle2.position.y, paddle2.width, paddle2.height})) {
+            // 客户端吃到道具
+            if (powerUp->type == 1) paddle2.Widen();
+            else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
+            else if (powerUp->type == 3) currentState.lives++;
+            powerUp->active = false;
+            CreateParticles(powerUp->position, powerUp->color, 15);
+            powerUp = nullptr;
+        } else if (powerUp->position.y > SCREEN_HEIGHT) {
+            powerUp->active = false;
+            powerUp = nullptr;
+        }
+    }
+
+    // 更新粒子
+    UpdateParticles(dt);
+
+    if (ball.position.y > SCREEN_HEIGHT || ball.position.y < 0) {
+        currentState.lives--;
+        if (currentState.lives <= 0) {
+            currentState.gameOver = true;
+        } else {
+            ball.position = {400, 300};
+            ball.velocity = {3, -3};
+            paddle1.ResetWidth();
+            paddle2.ResetWidth();
+        }
+    }
+
+    bool allBricksBroken = true;
+    for (const auto& brick : bricks) {
+        if (brick.active) {
+            allBricksBroken = false;
+            break;
+        }
+    }
+    if (allBricksBroken) currentState.victory = true;
+
+    // 更新同步状态，把道具的状态也同步
+    currentState.ballX = ball.position.x;
+    currentState.ballY = ball.position.y;
+    currentState.ballSpeedX = ball.velocity.x;
+    currentState.ballSpeedY = ball.velocity.y;
+    currentState.paddle1X = paddle1.position.x;
+    currentState.paddle2X = paddle2.position.x;
+    if (powerUp) {
+        currentState.powerUpActive = true;
+        currentState.powerUpX = powerUp->position.x;
+        currentState.powerUpY = powerUp->position.y;
+        currentState.powerUpType = powerUp->type;
+    } else {
+        currentState.powerUpActive = false;
+    }
+}
+
+void UpdateClientLogic() {
+    float dt = GetFrameTime();
+    if (IsKeyDown(KEY_A)) paddle2.MoveLeft(5.0f);
+    if (IsKeyDown(KEY_D)) paddle2.MoveRight(5.0f);
+
+    UpdateParticles(dt);
+
+    float paddleX = paddle2.position.x;
+    ENetPacket* packet = enet_packet_create(&paddleX, sizeof(float), ENET_PACKET_FLAG_UNSEQUENCED);
+    enet_peer_send(peer, 1, packet);
+}
+
+void InterpolateState(double now) {
+    if (nextSnapshot.timestamp <= lastSnapshot.timestamp) return;
+
+    float t = (now - lastSnapshot.timestamp) / (nextSnapshot.timestamp - lastSnapshot.timestamp);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    ball.position.x = lastSnapshot.state.ballX * (1-t) + nextSnapshot.state.ballX * t;
+    ball.position.y = lastSnapshot.state.ballY * (1-t) + nextSnapshot.state.ballY * t;
+    paddle1.position.x = lastSnapshot.state.paddle1X * (1-t) + nextSnapshot.state.paddle1X * t;
+    
+    // 客户端自己的板子，跳过插值，用本地实时的
+    // paddle2.position.x = lastSnapshot.state.paddle2X * (1-t) + nextSnapshot.state.paddle2X * t;
+
+    // 同步道具状态
+    if (nextSnapshot.state.powerUpActive) {
+        if (!powerUp) {
+            powerUp = new PowerUp({nextSnapshot.state.powerUpX, nextSnapshot.state.powerUpY}, nextSnapshot.state.powerUpType);
+        } else {
+            powerUp->position.x = lastSnapshot.state.powerUpX * (1-t) + nextSnapshot.state.powerUpX * t;
+            powerUp->position.y = lastSnapshot.state.powerUpY * (1-t) + nextSnapshot.state.powerUpY * t;
+        }
+    } else {
+        if (powerUp) { delete powerUp; powerUp = nullptr; }
+    }
+
+    currentState.score = nextSnapshot.state.score;
+    currentState.lives = nextSnapshot.state.lives;
+    currentState.gameOver = nextSnapshot.state.gameOver;
+    currentState.victory = nextSnapshot.state.victory;
+}
+
+void ProcessNetworkEvents() {
+    ENetEvent event;
+    while (enet_host_service(host, &event, 0) > 0) {
+        switch (event.type) {
+            case ENET_EVENT_TYPE_CONNECT:
+                cout << "Client connected!" << endl;
+                peer = event.peer;
+                break;
+
+            case ENET_EVENT_TYPE_RECEIVE:
+                if (isHost) {
+                    float paddleX = *(float*)event.packet->data;
+                    paddle2.position.x = paddleX;
+                } else {
+                    lastSnapshot = nextSnapshot;
+                    nextSnapshot.state = *(GameState*)event.packet->data;
+                    nextSnapshot.timestamp = GetTime();
+                }
+                enet_packet_destroy(event.packet);
+                break;
+
+            case ENET_EVENT_TYPE_DISCONNECT:
+                cout << "Disconnected!" << endl;
+                peer = nullptr;
+                break;
+
+            default: break;
+        }
     }
 }
 
 int main() {
-    // 1. 窗口初始化
-    const int screenWidth = 800;
-    const int screenHeight = 600;
-    InitWindow(screenWidth, screenHeight, "打砖块2D - 完整版");
+    if (enet_initialize() != 0) {
+        cerr << "ENet init failed!" << endl;
+        return 1;
+    }
+    atexit(enet_deinitialize);
 
-    // 2. 游戏对象初始化
-    Ball ball({400, 300}, {2, 2}, 10);
-    Paddle paddle(350, 550, 100, 20);
-    std::vector<Brick> bricks;
-    ResetGame(ball, paddle, bricks); // 初始化砖块
+    cout << "Select mode:" << endl;
+    cout << "1. Host (run first)" << endl;
+    cout << "2. Client (run second)" << endl;
+    int choice;
+    cin >> choice;
+    isHost = (choice == 1);
 
-    // 游戏状态枚举
-    enum GameState {
-        PLAYING,   // 游戏中
-        WIN,       // 胜利
-        GAME_OVER  // 失败
-    };
-    GameState gameState = PLAYING;
+    if (isHost) {
+        ENetAddress address;
+        enet_address_set_host(&address, "0.0.0.0");
+        address.port = PORT;
+        host = enet_host_create(&address, 1, 2, 0, 0);
+        cout << "Host started, waiting for client..." << endl;
+        ResetGame();
+    } else {
+        host = enet_host_create(nullptr, 1, 2, 0, 0);
+        ENetAddress address;
+        enet_address_set_host(&address, "127.0.0.1");
+        address.port = PORT;
+        peer = enet_host_connect(host, &address, 2, 0);
+        cout << "Connecting to host..." << endl;
+    }
 
-    SetTargetFPS(60); // 设置帧率60
+    if (!host) {
+        cerr << "ENet host create failed!" << endl;
+        return 1;
+    }
 
-    // 3. 游戏主循环
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Co-op");
+    SetTargetFPS(60);
+
     while (!WindowShouldClose()) {
-        // ========== 第一部分：输入处理 + 状态重置 ==========
-        if (IsKeyPressed(KEY_R)) { // 按R重新开始
-            ResetGame(ball, paddle, bricks);
-            gameState = PLAYING;
+        double now = GetTime();
+        ProcessNetworkEvents();
+
+        if (isHost && peer) {
+            UpdateHostLogic();
+
+            if (now - lastNetworkTime >= NETWORK_TICK_RATE) {
+                ENetPacket* packet = enet_packet_create(&currentState, sizeof(GameState),
+                    ENET_PACKET_FLAG_RELIABLE);
+                enet_peer_send(peer, 0, packet);
+                lastNetworkTime = now;
+            }
+        } else if (!isHost && peer) {
+            UpdateClientLogic();
+            InterpolateState(now);
         }
 
-        if (gameState == PLAYING) { // 只有游戏中才更新逻辑
-            // ========== 第二部分：更新游戏状态 ==========
-            // 球移动
-            ball.Move();
-            // 边界反弹（左右+上）
-            ball.BounceEdge(screenWidth, screenHeight);
-
-            // 球拍移动
-            if (IsKeyDown(KEY_LEFT)) paddle.MoveLeft(5);
-            if (IsKeyDown(KEY_RIGHT)) paddle.MoveRight(5);
-
-            // ========== 碰撞检测：球 + 球拍 ==========
-            if (CheckCollisionCircleRec(ball.position, ball.radius, paddle.rect)) {
-                // 反转垂直速度（反弹）
-                ball.speed.y *= -1;
-                // 微调球的位置，避免卡进球拍
-                ball.position.y = paddle.rect.y - ball.radius - 1;
-            }
-
-            // ========== 碰撞检测：球 + 砖块 ==========
-            for (auto& brick : bricks) {
-                if (brick.active && CheckCollisionCircleRec(ball.position, ball.radius, brick.rect)) {
-                    // 标记砖块为非激活（击碎）
-                    brick.active = false;
-                    
-                    // 检测碰撞方向，优化反弹逻辑（避免球卡进砖块）
-                    // 球的中心坐标
-                    float ballX = ball.position.x;
-                    float ballY = ball.position.y;
-                    // 砖块的边界
-                    float brickLeft = brick.rect.x;
-                    float brickRight = brick.rect.x + brick.rect.width;
-                    float brickTop = brick.rect.y;
-                    float brickBottom = brick.rect.y + brick.rect.height;
-
-                    // 水平方向碰撞（左右）
-                    if (ballX < brickLeft + 5 || ballX > brickRight - 5) {
-                        ball.speed.x *= -1;
-                    }
-                    // 垂直方向碰撞（上下）
-                    if (ballY < brickTop + 5 || ballY > brickBottom - 5) {
-                        ball.speed.y *= -1;
-                    }
-
-                    break; // 一次只碰撞一个砖块
-                }
-            }
-
-            // ========== 游戏结束判断 ==========
-            // 1. 球掉到底部 → 失败
-            if (ball.position.y + ball.radius >= screenHeight) {
-                gameState = GAME_OVER;
-            }
-            // 2. 所有砖块被击碎 → 胜利
-            bool allBricksBroken = true;
-            for (const auto& brick : bricks) {
-                if (brick.active) {
-                    allBricksBroken = false;
-                    break;
-                }
-            }
-            if (allBricksBroken) {
-                gameState = WIN;
-            }
+        if (IsKeyPressed(KEY_R) && isHost) {
+            ResetGame();
         }
 
-        // ========== 第三部分：绘制游戏画面 ==========
         BeginDrawing();
-        ClearBackground(RAYWHITE);
+        ClearBackground({20, 20, 30, 255});
 
-        // 1. 绘制边界墙（移到循环内，每帧绘制）
-        DrawRectangle(0, 0, 5, screenHeight, GRAY);        // 左墙
-        DrawRectangle(screenWidth-5, 0, 5, screenHeight, GRAY); // 右墙
-        DrawRectangle(0, 0, screenWidth, 5, GRAY);        // 顶墙
-        DrawRectangle(0, screenHeight-5, screenWidth, 5, GRAY); // 底墙
+        DrawRectangle(0, 0, 5, SCREEN_HEIGHT, GRAY);
+        DrawRectangle(SCREEN_WIDTH-5, 0, 5, SCREEN_HEIGHT, GRAY);
+        DrawRectangle(0, 0, SCREEN_WIDTH, 5, GRAY);
+        DrawRectangle(0, SCREEN_HEIGHT-5, SCREEN_WIDTH, 5, GRAY);
 
-        // 2. 绘制游戏对象
+        DrawText(TextFormat("Score: %d", currentState.score), 20, 15, 20, WHITE);
+        DrawText(TextFormat("Lives: %d", currentState.lives), 680, 15, 20, GREEN);
+        DrawText("A/D Move | R Reset", 320, 15, 20, LIGHTGRAY);
+
         ball.Draw();
-        paddle.Draw();
-        for (auto& brick : bricks) brick.Draw();
+        paddle1.Draw();
+        paddle2.Draw();
+        for (const auto& brick : bricks) brick.Draw();
+        if (powerUp) powerUp->Draw();
+        DrawParticles();
 
-        // 3. 绘制游戏状态提示
-        if (gameState == GAME_OVER) {
-            DrawText("游戏失败！按R重新开始", screenWidth/2 - 150, screenHeight/2, 30, RED);
-        } else if (gameState == WIN) {
-            DrawText("游戏胜利！按R重新开始", screenWidth/2 - 150, screenHeight/2, 30, GREEN);
+        if (!peer) {
+            DrawText("Waiting for connection...", 300, 300, 30, YELLOW);
+        } else if (currentState.gameOver) {
+            DrawText("GAME OVER | Press R to restart", 220, 300, 30, RED);
+        } else if (currentState.victory) {
+            DrawText("YOU WIN! | Press R to restart", 240, 300, 30, GREEN);
         }
 
         EndDrawing();
     }
 
-    // 4. 游戏收尾
+    if (powerUp) delete powerUp;
+    if (peer) enet_peer_disconnect(peer, 0);
+    enet_host_destroy(host);
     CloseWindow();
-    return 0;
-} */
-// main.cpp 精简后
-#include "raylib.h"
-#include "Game.h"
 
-int main() {
-    const int screenWidth = 800;
-    const int screenHeight = 600;
-    // 初始化窗口
-    InitWindow(screenWidth, screenHeight, "Breakout - Enhanced Edition");
-    SetTargetFPS(60);
-
-    // 创建游戏对象，全程只需要这一个对象
-    Game game;
-    game.Init();
-
-    // 游戏主循环，极简
-    while (!WindowShouldClose()) {
-        game.Update();
-        game.Draw();
-    }
-
-    // 收尾释放
-    game.Shutdown();
-    CloseWindow();
     return 0;
 }
