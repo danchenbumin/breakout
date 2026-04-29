@@ -2,11 +2,77 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <thread>
+#include <mutex>
+#include <future>
+#include <chrono>
+#include <unordered_map>
 #include <enet/enet.h>
 #include "raylib.h"
 using namespace std;
 
-// 强制1字节对齐
+// ====================== 本周新增：多线程异步加载相关定义 ======================
+// 加载状态枚举，完全匹配PPT定义
+enum class LoadState { IDLE, LOADING, DONE };
+// 全局加载状态与互斥锁（保护共享数据，避免数据竞争）
+LoadState g_loadState = LoadState::IDLE;
+mutex g_stateMutex;
+// 加载完成后的砖块新颜色，共享数据，加锁保护
+vector<Color> g_newBrickColors;
+future<vector<Color>> g_loadFuture;
+
+// 【加分项】PPT要求的线程安全纹理缓存单例
+class TextureCache {
+private:
+    unordered_map<string, Texture2D> cache;
+    mutable mutex mtx;
+    TextureCache() = default; // 私有构造，单例模式
+public:
+    // 线程安全的单例获取（C++11后静态局部变量初始化天然线程安全）
+    static TextureCache& GetInstance() {
+        static TextureCache instance;
+        return instance;
+    }
+    // 线程安全的纹理获取，重复路径只加载一次
+    Texture2D GetTexture(const string& path) {
+        lock_guard<mutex> lock(mtx);
+        auto it = cache.find(path);
+        if (it != cache.end()) return it->second;
+        Texture2D tex = LoadTexture(path.c_str());
+        cache[path] = tex;
+        return tex;
+    }
+    // 线程安全的缓存清理
+    void ClearCache() {
+        lock_guard<mutex> lock(mtx);
+        for (auto& pair : cache) UnloadTexture(pair.second);
+        cache.clear();
+    }
+};
+
+// 异步加载函数：工作线程执行，模拟大纹理加载耗时
+vector<Color> AsyncLoadLargeResource() {
+    // 模拟加载大型纹理/关卡资源的耗时操作（500ms，符合PPT示例）
+    this_thread::sleep_for(chrono::milliseconds(500));
+    
+    // 加载完成后生成新的砖块配色，作为加载结果返回
+    random_device rd;
+    mt19937 rng(rd());
+    uniform_int_distribution<int> colorDist(0, 255);
+    vector<Color> newColors;
+    for (int i = 0; i < 5; i++) {
+        newColors.emplace_back(Color{
+            (unsigned char)colorDist(rng),
+            (unsigned char)colorDist(rng),
+            (unsigned char)colorDist(rng),
+            255
+        });
+    }
+    return newColors;
+}
+// ================================================================================
+
+// 强制1字节对齐，解决跨平台结构体数据错位问题
 #pragma pack(1)
 struct GameState {
     float ballX, ballY;
@@ -93,7 +159,7 @@ public:
           width(w), height(h), originalWidth(w) {}
 
     float width;
-    float height;  // 补上了height！
+    float height;
     float originalWidth;
 
     void MoveLeft(float speed) {
@@ -222,12 +288,16 @@ void DrawParticles() {
     }
 }
 
-void InitBricks() {
+// 初始化砖块，支持自定义配色
+void InitBricks(const vector<Color>& colors = {RED, ORANGE, YELLOW, GREEN, BLUE}) {
     bricks.clear();
-    Color colors[5] = {RED, ORANGE, YELLOW, GREEN, BLUE};
     for (int row = 0; row < 5; row++) {
         for (int col = 0; col < 8; col++) {
-            bricks.emplace_back(Vector2{50.0f + col * 90.0f, 100.0f + row * 35.0f}, 85, 25, colors[row]);
+            bricks.emplace_back(
+                Vector2{50.0f + col * 90.0f, 100.0f + row * 35.0f},
+                85, 25,
+                row < colors.size() ? colors[row] : BLUE
+            );
         }
     }
 }
@@ -247,12 +317,42 @@ void ResetGame() {
     currentState.gameOver = false;
     currentState.victory = false;
     currentState.powerUpActive = false;
+    // 重置加载状态
+    lock_guard<mutex> lock(g_stateMutex);
+    g_loadState = LoadState::IDLE;
+    g_newBrickColors.clear();
 }
 
 void UpdateHostLogic() {
     float dt = GetFrameTime();
     if (IsKeyDown(KEY_A)) paddle1.MoveLeft(5.0f);
     if (IsKeyDown(KEY_D)) paddle1.MoveRight(5.0f);
+
+    // ====================== 本周新增：异步加载触发逻辑 ======================
+    // 按下L键，且当前无加载任务时，启动异步加载
+    if (IsKeyPressed(KEY_L)) {
+        lock_guard<mutex> lock(g_stateMutex);
+        if (g_loadState == LoadState::IDLE) {
+            g_loadState = LoadState::LOADING;
+            // 启动异步任务，强制在新线程执行，符合PPT要求
+            g_loadFuture = async(launch::async, AsyncLoadLargeResource);
+        }
+    }
+
+    // 检查异步加载是否完成
+    {
+        lock_guard<mutex> lock(g_stateMutex);
+        if (g_loadState == LoadState::LOADING) {
+            // 非阻塞检查future状态，主线程不卡顿
+            if (g_loadFuture.wait_for(chrono::seconds(0)) == future_status::ready) {
+                g_newBrickColors = g_loadFuture.get();
+                g_loadState = LoadState::DONE;
+                // 加载完成，更换砖块颜色
+                InitBricks(g_newBrickColors);
+            }
+        }
+    }
+    // ========================================================================
 
     ball.Move();
     ball.BounceEdge(SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -381,7 +481,7 @@ void InterpolateState(double now) {
     ball.position.y = lastSnapshot.state.ballY * (1-t) + nextSnapshot.state.ballY * t;
     paddle1.position.x = lastSnapshot.state.paddle1X * (1-t) + nextSnapshot.state.paddle1X * t;
     
-    // 客户端自己的板子，跳过插值，用本地实时的
+    // 客户端自己的板子，跳过插值，用本地实时的，避免抖动
     // paddle2.position.x = lastSnapshot.state.paddle2X * (1-t) + nextSnapshot.state.paddle2X * t;
 
     // 同步道具状态
@@ -468,7 +568,7 @@ int main() {
         return 1;
     }
 
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Co-op");
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Co-op + MultiThread");
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
@@ -493,6 +593,7 @@ int main() {
             ResetGame();
         }
 
+        // 绘制
         BeginDrawing();
         ClearBackground({20, 20, 30, 255});
 
@@ -503,7 +604,7 @@ int main() {
 
         DrawText(TextFormat("Score: %d", currentState.score), 20, 15, 20, WHITE);
         DrawText(TextFormat("Lives: %d", currentState.lives), 680, 15, 20, GREEN);
-        DrawText("A/D Move | R Reset", 320, 15, 20, LIGHTGRAY);
+        DrawText("A/D Move | R Reset | L Load Resource", 250, 15, 20, LIGHTGRAY);
 
         ball.Draw();
         paddle1.Draw();
@@ -511,6 +612,16 @@ int main() {
         for (const auto& brick : bricks) brick.Draw();
         if (powerUp) powerUp->Draw();
         DrawParticles();
+
+        // ====================== 本周新增：加载中提示 ======================
+        {
+            lock_guard<mutex> lock(g_stateMutex);
+            if (g_loadState == LoadState::LOADING) {
+                // 加载期间屏幕中央显示Loading...，游戏完全不卡顿
+                DrawText("Loading...", SCREEN_WIDTH/2 - 100, SCREEN_HEIGHT/2, 40, YELLOW);
+            }
+        }
+        // ==================================================================
 
         if (!peer) {
             DrawText("Waiting for connection...", 300, 300, 30, YELLOW);
@@ -523,7 +634,9 @@ int main() {
         EndDrawing();
     }
 
+    // 资源清理
     if (powerUp) delete powerUp;
+    TextureCache::GetInstance().ClearCache(); // 清理纹理缓存
     if (peer) enet_peer_disconnect(peer, 0);
     enet_host_destroy(host);
     CloseWindow();
