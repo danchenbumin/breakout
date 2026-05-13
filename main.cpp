@@ -11,99 +11,7 @@
 #include "raylib.h"
 using namespace std;
 
-// ====================== 本周新增：多线程异步加载相关定义 ======================
-// 加载状态枚举，完全匹配PPT定义
-enum class LoadState { IDLE, LOADING, DONE };
-// 全局加载状态与互斥锁（保护共享数据，避免数据竞争）
-LoadState g_loadState = LoadState::IDLE;
-mutex g_stateMutex;
-// 加载完成后的砖块新颜色，共享数据，加锁保护
-vector<Color> g_newBrickColors;
-future<vector<Color>> g_loadFuture;
-
-// 【加分项】PPT要求的线程安全纹理缓存单例
-class TextureCache {
-private:
-    unordered_map<string, Texture2D> cache;
-    mutable mutex mtx;
-    TextureCache() = default; // 私有构造，单例模式
-public:
-    // 线程安全的单例获取（C++11后静态局部变量初始化天然线程安全）
-    static TextureCache& GetInstance() {
-        static TextureCache instance;
-        return instance;
-    }
-    // 线程安全的纹理获取，重复路径只加载一次
-    Texture2D GetTexture(const string& path) {
-        lock_guard<mutex> lock(mtx);
-        auto it = cache.find(path);
-        if (it != cache.end()) return it->second;
-        Texture2D tex = LoadTexture(path.c_str());
-        cache[path] = tex;
-        return tex;
-    }
-    // 线程安全的缓存清理
-    void ClearCache() {
-        lock_guard<mutex> lock(mtx);
-        for (auto& pair : cache) UnloadTexture(pair.second);
-        cache.clear();
-    }
-};
-
-// 异步加载函数：工作线程执行，模拟大纹理加载耗时
-vector<Color> AsyncLoadLargeResource() {
-    // 模拟加载大型纹理/关卡资源的耗时操作（500ms，符合PPT示例）
-    this_thread::sleep_for(chrono::milliseconds(500));
-    
-    // 加载完成后生成新的砖块配色，作为加载结果返回
-    random_device rd;
-    mt19937 rng(rd());
-    uniform_int_distribution<int> colorDist(0, 255);
-    vector<Color> newColors;
-    for (int i = 0; i < 5; i++) {
-        newColors.emplace_back(Color{
-            (unsigned char)colorDist(rng),
-            (unsigned char)colorDist(rng),
-            (unsigned char)colorDist(rng),
-            255
-        });
-    }
-    return newColors;
-}
-// ================================================================================
-
-// 强制1字节对齐，解决跨平台结构体数据错位问题
-#pragma pack(1)
-struct GameState {
-    float ballX, ballY;
-    float ballSpeedX, ballSpeedY;
-    float paddle1X; // 主机的下板
-    float paddle2X; // 客户端的上板
-    int score;
-    int lives;
-    bool gameOver;
-    bool victory;
-    // 道具同步状态
-    bool powerUpActive;
-    float powerUpX, powerUpY;
-    int powerUpType; // 1=加宽 2=加速 3=生命
-};
-#pragma pack()
-
-struct Snapshot {
-    GameState state;
-    double timestamp;
-};
-
-// 粒子结构体
-struct Particle {
-    Vector2 position;
-    Vector2 velocity;
-    Color color;
-    float life;
-    float maxLife;
-};
-
+// ====================== 所有类定义移到最前面（解决声明顺序问题） ======================
 // 基础游戏对象类
 class GameObject {
 public:
@@ -204,14 +112,13 @@ public:
     }
 };
 
-// 道具类
 class PowerUp : public PhysicalObject, public VisualObject {
 public:
     PowerUp(Vector2 pos, int type) : PhysicalObject(pos, {0, 2}, 15), 
         VisualObject(pos, WHITE, true), type(type), active(true) {
-        if (type == 1) color = PURPLE; // 加宽
-        else if (type == 2) color = YELLOW; // 加速
-        else if (type == 3) color = GREEN; // 生命
+        if (type == 1) color = PURPLE;
+        else if (type == 2) color = YELLOW;
+        else if (type == 3) color = GREEN;
     }
 
     int type;
@@ -227,6 +134,257 @@ public:
             DrawText(type == 1 ? "W" : type == 2 ? "S" : "+", position.x-5, position.y-5, 12, WHITE);
         }
     }
+};
+// ======================================================================
+
+// ====================== 本周新增：性能测量工具 ======================
+struct PerformanceStats {
+    double updateTime;
+    double drawTime;
+    double collisionTime;
+    double particleTime;
+    double networkTime;
+    int frameCount;
+    double totalTime;
+};
+
+PerformanceStats g_stats = {0};
+double g_lastStatsPrint = 0.0;
+
+#define MEASURE_BLOCK_START() double __start = GetTime()
+#define MEASURE_BLOCK_END(var) var += (GetTime() - __start) * 1000
+
+void PrintPerformanceStats() {
+    double now = GetTime();
+    if (now - g_lastStatsPrint >= 10.0) { // 每10秒打印一次平均耗时
+        if (g_stats.frameCount > 0) {
+            TraceLog(LOG_INFO, "=== 性能统计（平均每帧，单位ms） ===");
+            TraceLog(LOG_INFO, "总更新耗时: %.2f", g_stats.updateTime / g_stats.frameCount);
+            TraceLog(LOG_INFO, "  碰撞检测: %.2f", g_stats.collisionTime / g_stats.frameCount);
+            TraceLog(LOG_INFO, "  粒子更新: %.2f", g_stats.particleTime / g_stats.frameCount);
+            TraceLog(LOG_INFO, "  网络同步: %.2f", g_stats.networkTime / g_stats.frameCount);
+            TraceLog(LOG_INFO, "绘制耗时: %.2f", g_stats.drawTime / g_stats.frameCount);
+            TraceLog(LOG_INFO, "平均帧率: %.1f", g_stats.frameCount / (now - g_lastStatsPrint));
+            TraceLog(LOG_INFO, "===================================");
+        }
+        // 重置统计
+        g_stats = {0};
+        g_lastStatsPrint = now;
+    }
+    g_stats.frameCount++;
+}
+// ======================================================================
+
+// ====================== 本周新增：粒子对象池（优化频繁new/delete） ======================
+const int MAX_PARTICLES = 100; // 预分配最大100个粒子，足够游戏使用
+
+struct Particle {
+    Vector2 position;
+    Vector2 velocity;
+    Color color;
+    float life;
+    float maxLife;
+    bool active; // 对象池标记：是否正在使用
+};
+
+Particle g_particlePool[MAX_PARTICLES]; // 预分配数组，内存连续，缓存友好
+
+// 初始化粒子池
+void InitParticlePool() {
+    for (int i = 0; i < MAX_PARTICLES; i++) {
+        g_particlePool[i].active = false;
+    }
+}
+
+// 从对象池获取一个空闲粒子
+void SpawnParticle(Vector2 pos, Vector2 vel, Color color, float life) {
+    for (int i = 0; i < MAX_PARTICLES; i++) {
+        if (!g_particlePool[i].active) {
+            g_particlePool[i].position = pos;
+            g_particlePool[i].velocity = vel;
+            g_particlePool[i].color = color;
+            g_particlePool[i].life = life;
+            g_particlePool[i].maxLife = life;
+            g_particlePool[i].active = true;
+            return;
+        }
+    }
+}
+
+// 更新所有活跃粒子
+void UpdateParticles(float dt) {
+    MEASURE_BLOCK_START();
+    for (int i = 0; i < MAX_PARTICLES; i++) {
+        if (g_particlePool[i].active) {
+            g_particlePool[i].position.x += g_particlePool[i].velocity.x;
+            g_particlePool[i].position.y += g_particlePool[i].velocity.y;
+            g_particlePool[i].life -= dt;
+            if (g_particlePool[i].life <= 0) {
+                g_particlePool[i].active = false;
+            }
+        }
+    }
+    MEASURE_BLOCK_END(g_stats.particleTime);
+}
+
+// 绘制所有活跃粒子
+void DrawParticles() {
+    for (int i = 0; i < MAX_PARTICLES; i++) {
+        if (g_particlePool[i].active) {
+            float alpha = g_particlePool[i].life / g_particlePool[i].maxLife;
+            DrawCircleV(g_particlePool[i].position, 3, Color{
+                g_particlePool[i].color.r,
+                g_particlePool[i].color.g,
+                g_particlePool[i].color.b,
+                (unsigned char)(alpha * 255)
+            });
+        }
+    }
+}
+
+// 批量创建粒子
+void CreateParticles(Vector2 pos, Color color, int count) {
+    uniform_real_distribution<float> dist(-3, 3);
+    random_device rd;
+    mt19937 rng(rd());
+    for (int i = 0; i < count; i++) {
+        SpawnParticle(pos, {dist(rng), dist(rng)}, color, 1.0f);
+    }
+}
+// ======================================================================
+
+// ====================== 本周新增：碰撞检测空间划分（网格法优化O(N²)） ======================
+const int GRID_WIDTH = 8;
+const int GRID_HEIGHT = 6;
+const int CELL_WIDTH = 100;
+const int CELL_HEIGHT = 100;
+
+vector<Brick*> g_grid[GRID_WIDTH][GRID_HEIGHT]; // 网格，每个格子存指向砖块的指针
+
+// 【现在Brick和Ball都已经定义了，不会报错了】
+bool CheckBallBrickCollision(Ball& ball, vector<Brick>& bricks, int& score);
+
+// 更新砖块在网格中的位置
+void UpdateGrid(const vector<Brick>& bricks) {
+    // 清空网格
+    for (int i = 0; i < GRID_WIDTH; i++) {
+        for (int j = 0; j < GRID_HEIGHT; j++) {
+            g_grid[i][j].clear();
+        }
+    }
+    // 将活跃砖块放入对应网格
+    for (const auto& brick : bricks) {
+        if (brick.active) {
+            int gx = brick.position.x / CELL_WIDTH;
+            int gy = brick.position.y / CELL_HEIGHT;
+            if (gx >= 0 && gx < GRID_WIDTH && gy >= 0 && gy < GRID_HEIGHT) {
+                g_grid[gx][gy].push_back((Brick*)&brick);
+            }
+        }
+    }
+}
+
+// 检测球与砖块的碰撞（只检测球所在的网格）
+bool CheckBallBrickCollision(Ball& ball, vector<Brick>& bricks, int& score) {
+    MEASURE_BLOCK_START();
+    int gx = ball.position.x / CELL_WIDTH;
+    int gy = ball.position.y / CELL_HEIGHT;
+
+    // 只检测球所在的网格及相邻网格（防止球在边界时漏检）
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            int checkX = gx + dx;
+            int checkY = gy + dy;
+            if (checkX >= 0 && checkX < GRID_WIDTH && checkY >= 0 && checkY < GRID_HEIGHT) {
+                for (auto brick : g_grid[checkX][checkY]) {
+                    if (brick->active && CheckCollisionCircleRec(ball.position, ball.radius,
+                        {brick->position.x, brick->position.y, brick->width, brick->height})) {
+                        brick->active = false;
+                        score += 10;
+                        ball.velocity.y *= -1;
+                        CreateParticles(brick->position, brick->color, 10);
+                        MEASURE_BLOCK_END(g_stats.collisionTime);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    MEASURE_BLOCK_END(g_stats.collisionTime);
+    return false;
+}
+// ======================================================================
+
+// 多线程异步加载相关定义
+enum class LoadState { IDLE, LOADING, DONE };
+LoadState g_loadState = LoadState::IDLE;
+mutex g_stateMutex;
+vector<Color> g_newBrickColors;
+future<vector<Color>> g_loadFuture;
+
+// 线程安全纹理缓存单例
+class TextureCache {
+private:
+    unordered_map<string, Texture2D> cache;
+    mutable mutex mtx;
+    TextureCache() = default;
+public:
+    static TextureCache& GetInstance() {
+        static TextureCache instance;
+        return instance;
+    }
+    Texture2D GetTexture(const string& path) {
+        lock_guard<mutex> lock(mtx);
+        auto it = cache.find(path);
+        if (it != cache.end()) return it->second;
+        Texture2D tex = LoadTexture(path.c_str());
+        cache[path] = tex;
+        return tex;
+    }
+    void ClearCache() {
+        lock_guard<mutex> lock(mtx);
+        for (auto& pair : cache) UnloadTexture(pair.second);
+        cache.clear();
+    }
+};
+
+vector<Color> AsyncLoadLargeResource() {
+    this_thread::sleep_for(chrono::milliseconds(500));
+    random_device rd;
+    mt19937 rng(rd());
+    uniform_int_distribution<int> colorDist(0, 255);
+    vector<Color> newColors;
+    for (int i = 0; i < 5; i++) {
+        newColors.emplace_back(Color{
+            (unsigned char)colorDist(rng),
+            (unsigned char)colorDist(rng),
+            (unsigned char)colorDist(rng),
+            255
+        });
+    }
+    return newColors;
+}
+
+// 强制1字节对齐
+#pragma pack(1)
+struct GameState {
+    float ballX, ballY;
+    float ballSpeedX, ballSpeedY;
+    float paddle1X;
+    float paddle2X;
+    int score;
+    int lives;
+    bool gameOver;
+    bool victory;
+    bool powerUpActive;
+    float powerUpX, powerUpY;
+    int powerUpType;
+};
+#pragma pack()
+
+struct Snapshot {
+    GameState state;
+    double timestamp;
 };
 
 // 全局变量
@@ -244,7 +402,6 @@ Snapshot lastSnapshot, nextSnapshot;
 double lastNetworkTime = 0.0f;
 
 vector<Brick> bricks;
-vector<Particle> particles;
 Ball ball({400, 300}, {3, -3}, 10, RED);
 Paddle paddle1({350, 550}, 100, 20, BLUE);
 Paddle paddle2({350, 30}, 100, 20, GREEN);
@@ -252,43 +409,6 @@ PowerUp* powerUp = nullptr;
 
 mt19937 rng(random_device{}());
 
-// 创建粒子特效
-void CreateParticles(Vector2 pos, Color color, int count) {
-    uniform_real_distribution<float> dist(-3, 3);
-    for (int i = 0; i < count; i++) {
-        Particle p;
-        p.position = pos;
-        p.velocity = {dist(rng), dist(rng)};
-        p.color = color;
-        p.life = 1.0f;
-        p.maxLife = 1.0f;
-        particles.push_back(p);
-    }
-}
-
-// 更新粒子
-void UpdateParticles(float dt) {
-    for (auto it = particles.begin(); it != particles.end();) {
-        it->position.x += it->velocity.x;
-        it->position.y += it->velocity.y;
-        it->life -= dt;
-        if (it->life <= 0) {
-            it = particles.erase(it);
-        } else {
-            it++;
-        }
-    }
-}
-
-// 绘制粒子
-void DrawParticles() {
-    for (const auto& p : particles) {
-        float alpha = p.life / p.maxLife;
-        DrawCircleV(p.position, 3, Color{p.color.r, p.color.g, p.color.b, (unsigned char)(alpha * 255)});
-    }
-}
-
-// 初始化砖块，支持自定义配色
 void InitBricks(const vector<Color>& colors = {RED, ORANGE, YELLOW, GREEN, BLUE}) {
     bricks.clear();
     for (int row = 0; row < 5; row++) {
@@ -300,6 +420,7 @@ void InitBricks(const vector<Color>& colors = {RED, ORANGE, YELLOW, GREEN, BLUE}
             );
         }
     }
+    UpdateGrid(bricks); // 初始化网格
 }
 
 void ResetGame() {
@@ -311,52 +432,48 @@ void ResetGame() {
     paddle2.position = {350, 30};
     paddle2.ResetWidth();
     if (powerUp) { delete powerUp; powerUp = nullptr; }
-    particles.clear();
+    InitParticlePool(); // 重置粒子池
     currentState.score = 0;
     currentState.lives = 3;
     currentState.gameOver = false;
     currentState.victory = false;
     currentState.powerUpActive = false;
-    // 重置加载状态
     lock_guard<mutex> lock(g_stateMutex);
     g_loadState = LoadState::IDLE;
     g_newBrickColors.clear();
 }
 
 void UpdateHostLogic() {
+    MEASURE_BLOCK_START();
     float dt = GetFrameTime();
     if (IsKeyDown(KEY_A)) paddle1.MoveLeft(5.0f);
     if (IsKeyDown(KEY_D)) paddle1.MoveRight(5.0f);
 
-    // ====================== 本周新增：异步加载触发逻辑 ======================
-    // 按下L键，且当前无加载任务时，启动异步加载
+    // 异步加载触发逻辑
     if (IsKeyPressed(KEY_L)) {
         lock_guard<mutex> lock(g_stateMutex);
         if (g_loadState == LoadState::IDLE) {
             g_loadState = LoadState::LOADING;
-            // 启动异步任务，强制在新线程执行，符合PPT要求
             g_loadFuture = async(launch::async, AsyncLoadLargeResource);
         }
     }
 
-    // 检查异步加载是否完成
+    // 检查异步加载完成
     {
         lock_guard<mutex> lock(g_stateMutex);
         if (g_loadState == LoadState::LOADING) {
-            // 非阻塞检查future状态，主线程不卡顿
             if (g_loadFuture.wait_for(chrono::seconds(0)) == future_status::ready) {
                 g_newBrickColors = g_loadFuture.get();
                 g_loadState = LoadState::DONE;
-                // 加载完成，更换砖块颜色
                 InitBricks(g_newBrickColors);
             }
         }
     }
-    // ========================================================================
 
     ball.Move();
     ball.BounceEdge(SCREEN_WIDTH, SCREEN_HEIGHT);
 
+    // 球与板子碰撞
     if (CheckCollisionCircleRec(ball.position, ball.radius,
         {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
         ball.velocity.y = -fabs(ball.velocity.y);
@@ -371,31 +488,15 @@ void UpdateHostLogic() {
         CreateParticles(ball.position, GREEN, 5);
     }
 
-    for (auto& brick : bricks) {
-        if (brick.active && CheckCollisionCircleRec(ball.position, ball.radius,
-            {brick.position.x, brick.position.y, brick.width, brick.height})) {
-            brick.active = false;
-            currentState.score += 10;
-            ball.velocity.y *= -1;
-            CreateParticles(brick.position, brick.color, 10);
-            
-            // 随机掉落道具
-            uniform_int_distribution<int> dist(1, 5);
-            if (dist(rng) == 1 && !powerUp) {
-                uniform_int_distribution<int> typeDist(1, 3);
-                powerUp = new PowerUp(brick.position, typeDist(rng));
-            }
-            break;
-        }
-    }
+    // 球与砖块碰撞（使用优化后的网格法）
+    CheckBallBrickCollision(ball, bricks, currentState.score);
+    UpdateGrid(bricks); // 每帧更新网格
 
-    // 更新道具
+    // 道具更新
     if (powerUp && powerUp->active) {
         powerUp->Update();
-        // 检测道具碰撞
         if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
             {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
-            // 主机吃到道具
             if (powerUp->type == 1) paddle1.Widen();
             else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
             else if (powerUp->type == 3) currentState.lives++;
@@ -404,7 +505,6 @@ void UpdateHostLogic() {
             powerUp = nullptr;
         } else if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
             {paddle2.position.x, paddle2.position.y, paddle2.width, paddle2.height})) {
-            // 客户端吃到道具
             if (powerUp->type == 1) paddle2.Widen();
             else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
             else if (powerUp->type == 3) currentState.lives++;
@@ -417,7 +517,19 @@ void UpdateHostLogic() {
         }
     }
 
-    // 更新粒子
+    // 随机掉落道具
+    static uniform_int_distribution<int> dist(1, 5);
+    static uniform_int_distribution<int> typeDist(1, 3);
+    if (dist(rng) == 1 && !powerUp && !bricks.empty()) {
+        // 从已打碎的砖块位置掉落
+        for (const auto& brick : bricks) {
+            if (!brick.active) {
+                powerUp = new PowerUp(brick.position, typeDist(rng));
+                break;
+            }
+        }
+    }
+
     UpdateParticles(dt);
 
     if (ball.position.y > SCREEN_HEIGHT || ball.position.y < 0) {
@@ -441,7 +553,7 @@ void UpdateHostLogic() {
     }
     if (allBricksBroken) currentState.victory = true;
 
-    // 更新同步状态，把道具的状态也同步
+    // 更新同步状态
     currentState.ballX = ball.position.x;
     currentState.ballY = ball.position.y;
     currentState.ballSpeedX = ball.velocity.x;
@@ -456,9 +568,12 @@ void UpdateHostLogic() {
     } else {
         currentState.powerUpActive = false;
     }
+
+    MEASURE_BLOCK_END(g_stats.updateTime);
 }
 
 void UpdateClientLogic() {
+    MEASURE_BLOCK_START();
     float dt = GetFrameTime();
     if (IsKeyDown(KEY_A)) paddle2.MoveLeft(5.0f);
     if (IsKeyDown(KEY_D)) paddle2.MoveRight(5.0f);
@@ -468,6 +583,8 @@ void UpdateClientLogic() {
     float paddleX = paddle2.position.x;
     ENetPacket* packet = enet_packet_create(&paddleX, sizeof(float), ENET_PACKET_FLAG_UNSEQUENCED);
     enet_peer_send(peer, 1, packet);
+
+    MEASURE_BLOCK_END(g_stats.updateTime);
 }
 
 void InterpolateState(double now) {
@@ -480,11 +597,7 @@ void InterpolateState(double now) {
     ball.position.x = lastSnapshot.state.ballX * (1-t) + nextSnapshot.state.ballX * t;
     ball.position.y = lastSnapshot.state.ballY * (1-t) + nextSnapshot.state.ballY * t;
     paddle1.position.x = lastSnapshot.state.paddle1X * (1-t) + nextSnapshot.state.paddle1X * t;
-    
-    // 客户端自己的板子，跳过插值，用本地实时的，避免抖动
-    // paddle2.position.x = lastSnapshot.state.paddle2X * (1-t) + nextSnapshot.state.paddle2X * t;
 
-    // 同步道具状态
     if (nextSnapshot.state.powerUpActive) {
         if (!powerUp) {
             powerUp = new PowerUp({nextSnapshot.state.powerUpX, nextSnapshot.state.powerUpY}, nextSnapshot.state.powerUpType);
@@ -503,6 +616,7 @@ void InterpolateState(double now) {
 }
 
 void ProcessNetworkEvents() {
+    MEASURE_BLOCK_START();
     ENetEvent event;
     while (enet_host_service(host, &event, 0) > 0) {
         switch (event.type) {
@@ -531,6 +645,7 @@ void ProcessNetworkEvents() {
             default: break;
         }
     }
+    MEASURE_BLOCK_END(g_stats.networkTime);
 }
 
 int main() {
@@ -539,6 +654,8 @@ int main() {
         return 1;
     }
     atexit(enet_deinitialize);
+
+    InitParticlePool(); // 初始化粒子池
 
     cout << "Select mode:" << endl;
     cout << "1. Host (run first)" << endl;
@@ -568,7 +685,7 @@ int main() {
         return 1;
     }
 
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Co-op + MultiThread");
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Co-op + Performance Optimized");
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
@@ -594,6 +711,7 @@ int main() {
         }
 
         // 绘制
+        MEASURE_BLOCK_START();
         BeginDrawing();
         ClearBackground({20, 20, 30, 255});
 
@@ -613,15 +731,13 @@ int main() {
         if (powerUp) powerUp->Draw();
         DrawParticles();
 
-        // ====================== 本周新增：加载中提示 ======================
+        // 加载中提示
         {
             lock_guard<mutex> lock(g_stateMutex);
             if (g_loadState == LoadState::LOADING) {
-                // 加载期间屏幕中央显示Loading...，游戏完全不卡顿
                 DrawText("Loading...", SCREEN_WIDTH/2 - 100, SCREEN_HEIGHT/2, 40, YELLOW);
             }
         }
-        // ==================================================================
 
         if (!peer) {
             DrawText("Waiting for connection...", 300, 300, 30, YELLOW);
@@ -632,11 +748,14 @@ int main() {
         }
 
         EndDrawing();
+        MEASURE_BLOCK_END(g_stats.drawTime);
+
+        PrintPerformanceStats(); // 打印性能统计
     }
 
     // 资源清理
     if (powerUp) delete powerUp;
-    TextureCache::GetInstance().ClearCache(); // 清理纹理缓存
+    TextureCache::GetInstance().ClearCache();
     if (peer) enet_peer_disconnect(peer, 0);
     enet_host_destroy(host);
     CloseWindow();
