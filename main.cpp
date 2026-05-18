@@ -7,12 +7,17 @@
 #include <future>
 #include <chrono>
 #include <unordered_map>
+#include <fstream>
+#include <filesystem>
 #include <enet/enet.h>
 #include "raylib.h"
-using namespace std;
+#include "nlohmann/json.hpp"
 
-// ====================== 所有类定义移到最前面（解决声明顺序问题） ======================
-// 基础游戏对象类
+using namespace std;
+using json = nlohmann::json;
+namespace fs = std::filesystem;
+
+// ====================== 所有类定义 ======================
 class GameObject {
 public:
     GameObject(Vector2 pos = {0, 0}) : position(pos) {}
@@ -95,14 +100,14 @@ public:
 
 class Brick : public PhysicalObject, public VisualObject {
 public:
-    Brick(Vector2 pos = {0, 0}, float w = 85, float h = 25, Color c = BLUE)
+    Brick(Vector2 pos = {0, 0}, float w = 85, float h = 25, Color c = BLUE, int t = 1)
         : GameObject(pos), PhysicalObject(pos, {0, 0}, 0), VisualObject(pos, c, true),
-          width(w), height(h), active(true), hits(1) {}
+          width(w), height(h), active(true), type(t) {}
 
     float width;
     float height;
     bool active;
-    int hits;
+    int type;
 
     void Draw() const override {
         if (visible && active) {
@@ -137,7 +142,79 @@ public:
 };
 // ======================================================================
 
-// ====================== 本周新增：性能测量工具 ======================
+// ====================== 本周新增：JSON工具函数（已修复所有报错） ======================
+Color GetColorFromName(const string& name) {
+    static unordered_map<string, Color> colorMap = {
+        {"red", RED}, {"orange", ORANGE}, {"yellow", YELLOW},
+        {"green", GREEN}, {"blue", BLUE}, {"purple", PURPLE},
+        {"cyan", Color{0, 255, 255, 255}}, {"white", WHITE}, {"gray", GRAY}
+    };
+    if (colorMap.count(name)) return colorMap[name];
+    return BLUE;
+}
+
+json LoadJSONWithFallback(const string& path, const json& fallback) {
+    try {
+        ifstream file(path);
+        if (!file.is_open()) {
+            TraceLog(LOG_WARNING, "文件不存在: %s, 使用默认配置", path.c_str());
+            return fallback;
+        }
+        json config;
+        file >> config;
+        return config;
+    } catch (const json::parse_error& e) {
+        TraceLog(LOG_ERROR, "JSON解析失败: %s, 使用默认配置", e.what());
+        return fallback;
+    }
+}
+
+void SaveJSON(const string& path, const json& data) {
+    try {
+        ofstream file(path);
+        file << data.dump(4); // 格式化输出，缩进4空格
+        TraceLog(LOG_INFO, "文件保存成功: %s", path.c_str());
+    } catch (const exception& e) {
+        TraceLog(LOG_ERROR, "文件保存失败: %s", e.what());
+    }
+}
+// ======================================================================
+
+// ====================== 本周新增：存档系统 ======================
+struct SaveData {
+    int version = 1;
+    int currentLevel = 1;
+    int score = 0;
+    int lives = 3;
+};
+
+bool SaveExists() {
+    return fs::exists("save.json");
+}
+
+SaveData LoadSave() {
+    SaveData data;
+    json save = LoadJSONWithFallback("save.json", json::object());
+    
+    if (save.contains("version") && save["version"] == 1) {
+        data.currentLevel = save.value("current_level", 1);
+        data.score = save.value("score", 0);
+        data.lives = save.value("lives", 3);
+    }
+    return data;
+}
+
+void SaveGame(const SaveData& data) {
+    json save;
+    save["version"] = data.version;
+    save["current_level"] = data.currentLevel;
+    save["score"] = data.score;
+    save["lives"] = data.lives;
+    SaveJSON("save.json", save);
+}
+// ======================================================================
+
+// ====================== 性能测量工具 ======================
 struct PerformanceStats {
     double updateTime;
     double drawTime;
@@ -156,7 +233,7 @@ double g_lastStatsPrint = 0.0;
 
 void PrintPerformanceStats() {
     double now = GetTime();
-    if (now - g_lastStatsPrint >= 10.0) { // 每10秒打印一次平均耗时
+    if (now - g_lastStatsPrint >= 10.0) {
         if (g_stats.frameCount > 0) {
             TraceLog(LOG_INFO, "=== 性能统计（平均每帧，单位ms） ===");
             TraceLog(LOG_INFO, "总更新耗时: %.2f", g_stats.updateTime / g_stats.frameCount);
@@ -167,7 +244,6 @@ void PrintPerformanceStats() {
             TraceLog(LOG_INFO, "平均帧率: %.1f", g_stats.frameCount / (now - g_lastStatsPrint));
             TraceLog(LOG_INFO, "===================================");
         }
-        // 重置统计
         g_stats = {0};
         g_lastStatsPrint = now;
     }
@@ -175,8 +251,8 @@ void PrintPerformanceStats() {
 }
 // ======================================================================
 
-// ====================== 本周新增：粒子对象池（优化频繁new/delete） ======================
-const int MAX_PARTICLES = 100; // 预分配最大100个粒子，足够游戏使用
+// ====================== 粒子对象池 ======================
+const int MAX_PARTICLES = 100;
 
 struct Particle {
     Vector2 position;
@@ -184,19 +260,17 @@ struct Particle {
     Color color;
     float life;
     float maxLife;
-    bool active; // 对象池标记：是否正在使用
+    bool active;
 };
 
-Particle g_particlePool[MAX_PARTICLES]; // 预分配数组，内存连续，缓存友好
+Particle g_particlePool[MAX_PARTICLES];
 
-// 初始化粒子池
 void InitParticlePool() {
     for (int i = 0; i < MAX_PARTICLES; i++) {
         g_particlePool[i].active = false;
     }
 }
 
-// 从对象池获取一个空闲粒子
 void SpawnParticle(Vector2 pos, Vector2 vel, Color color, float life) {
     for (int i = 0; i < MAX_PARTICLES; i++) {
         if (!g_particlePool[i].active) {
@@ -211,7 +285,6 @@ void SpawnParticle(Vector2 pos, Vector2 vel, Color color, float life) {
     }
 }
 
-// 更新所有活跃粒子
 void UpdateParticles(float dt) {
     MEASURE_BLOCK_START();
     for (int i = 0; i < MAX_PARTICLES; i++) {
@@ -227,7 +300,6 @@ void UpdateParticles(float dt) {
     MEASURE_BLOCK_END(g_stats.particleTime);
 }
 
-// 绘制所有活跃粒子
 void DrawParticles() {
     for (int i = 0; i < MAX_PARTICLES; i++) {
         if (g_particlePool[i].active) {
@@ -242,7 +314,6 @@ void DrawParticles() {
     }
 }
 
-// 批量创建粒子
 void CreateParticles(Vector2 pos, Color color, int count) {
     uniform_real_distribution<float> dist(-3, 3);
     random_device rd;
@@ -253,26 +324,21 @@ void CreateParticles(Vector2 pos, Color color, int count) {
 }
 // ======================================================================
 
-// ====================== 本周新增：碰撞检测空间划分（网格法优化O(N²)） ======================
+// ====================== 碰撞检测网格划分 ======================
 const int GRID_WIDTH = 8;
 const int GRID_HEIGHT = 6;
 const int CELL_WIDTH = 100;
 const int CELL_HEIGHT = 100;
 
-vector<Brick*> g_grid[GRID_WIDTH][GRID_HEIGHT]; // 网格，每个格子存指向砖块的指针
-
-// 【现在Brick和Ball都已经定义了，不会报错了】
+vector<Brick*> g_grid[GRID_WIDTH][GRID_HEIGHT];
 bool CheckBallBrickCollision(Ball& ball, vector<Brick>& bricks, int& score);
 
-// 更新砖块在网格中的位置
 void UpdateGrid(const vector<Brick>& bricks) {
-    // 清空网格
     for (int i = 0; i < GRID_WIDTH; i++) {
         for (int j = 0; j < GRID_HEIGHT; j++) {
             g_grid[i][j].clear();
         }
     }
-    // 将活跃砖块放入对应网格
     for (const auto& brick : bricks) {
         if (brick.active) {
             int gx = brick.position.x / CELL_WIDTH;
@@ -284,13 +350,11 @@ void UpdateGrid(const vector<Brick>& bricks) {
     }
 }
 
-// 检测球与砖块的碰撞（只检测球所在的网格）
 bool CheckBallBrickCollision(Ball& ball, vector<Brick>& bricks, int& score) {
     MEASURE_BLOCK_START();
     int gx = ball.position.x / CELL_WIDTH;
     int gy = ball.position.y / CELL_HEIGHT;
 
-    // 只检测球所在的网格及相邻网格（防止球在边界时漏检）
     for (int dx = -1; dx <= 1; dx++) {
         for (int dy = -1; dy <= 1; dy++) {
             int checkX = gx + dx;
@@ -315,14 +379,92 @@ bool CheckBallBrickCollision(Ball& ball, vector<Brick>& bricks, int& score) {
 }
 // ======================================================================
 
-// 多线程异步加载相关定义
+// ====================== 本周新增：编辑模式 ======================
+bool g_editingMode = false;
+int g_selectedBrickType = 1;
+
+void ToggleEditingMode() {
+    g_editingMode = !g_editingMode;
+    if (g_editingMode) {
+        TraceLog(LOG_INFO, "进入编辑模式：鼠标左键添加砖块，右键删除，按S保存");
+    } else {
+        TraceLog(LOG_INFO, "退出编辑模式");
+    }
+}
+
+void UpdateEditingMode(vector<Brick>& bricks, float brickWidth, float brickHeight) {
+    if (!g_editingMode) return;
+
+    Vector2 mouse = GetMousePosition();
+    
+    // 鼠标左键添加砖块
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        // 对齐到网格
+        float x = floor(mouse.x / brickWidth) * brickWidth;
+        float y = floor(mouse.y / brickHeight) * brickHeight;
+        
+        // 检查是否已有砖块
+        bool exists = false;
+        for (auto& brick : bricks) {
+            if (fabs(brick.position.x - x) < 1 && fabs(brick.position.y - y) < 1) {
+                exists = true;
+                break;
+            }
+        }
+        
+        if (!exists && x >= 5 && x + brickWidth <= 795 && y >= 100 && y + brickHeight <= 500) {
+            bricks.emplace_back(Vector2{x, y}, brickWidth, brickHeight, PURPLE, g_selectedBrickType);
+        }
+    }
+    
+    // 鼠标右键删除砖块
+    if (IsMouseButtonPressed(MOUSE_RIGHT_BUTTON)) {
+        for (auto it = bricks.begin(); it != bricks.end();) {
+            if (CheckCollisionPointRec(mouse, {it->position.x, it->position.y, it->width, it->height})) {
+                it = bricks.erase(it);
+            } else {
+                it++;
+            }
+        }
+    }
+    
+    // 按S保存当前关卡
+    if (IsKeyPressed(KEY_S)) {
+        json level;
+        level["version"] = 1;
+        level["name"] = "自定义关卡";
+        level["ball_speed"] = 3.0;
+        level["bricks"]["rows"] = 5;
+        level["bricks"]["cols"] = 8;
+        level["bricks"]["width"] = 85;
+        level["bricks"]["height"] = 25;
+        level["bricks"]["offset_x"] = 50;
+        level["bricks"]["offset_y"] = 100;
+        
+        // 初始化布局为全0
+        vector<vector<int>> layout(5, vector<int>(8, 0));
+        for (const auto& brick : bricks) {
+            int col = (brick.position.x - 50) / 90;
+            int row = (brick.position.y - 100) / 35;
+            if (row >= 0 && row < 5 && col >= 0 && col < 8) {
+                layout[row][col] = brick.type;
+            }
+        }
+        level["bricks"]["layout"] = layout;
+        level["bricks"]["color_map"]["1"] = "purple";
+        
+        SaveJSON("levels/custom.json", level);
+    }
+}
+// ======================================================================
+
+// 多线程异步加载
 enum class LoadState { IDLE, LOADING, DONE };
 LoadState g_loadState = LoadState::IDLE;
 mutex g_stateMutex;
 vector<Color> g_newBrickColors;
 future<vector<Color>> g_loadFuture;
 
-// 线程安全纹理缓存单例
 class TextureCache {
 private:
     unordered_map<string, Texture2D> cache;
@@ -365,7 +507,7 @@ vector<Color> AsyncLoadLargeResource() {
     return newColors;
 }
 
-// 强制1字节对齐
+// 网络同步结构体
 #pragma pack(1)
 struct GameState {
     float ballX, ballY;
@@ -379,6 +521,8 @@ struct GameState {
     bool powerUpActive;
     float powerUpX, powerUpY;
     int powerUpType;
+    int currentLevel;
+    bool editingMode;
 };
 #pragma pack()
 
@@ -392,6 +536,7 @@ const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
 const int PORT = 12345;
 const float NETWORK_TICK_RATE = 1.0f / 30.0f;
+const int TOTAL_LEVELS = 3;
 
 bool isHost = false;
 ENetHost* host = nullptr;
@@ -408,31 +553,87 @@ Paddle paddle2({350, 30}, 100, 20, GREEN);
 PowerUp* powerUp = nullptr;
 
 mt19937 rng(random_device{}());
+float g_brickWidth = 85;
+float g_brickHeight = 25;
 
-void InitBricks(const vector<Color>& colors = {RED, ORANGE, YELLOW, GREEN, BLUE}) {
+// ====================== 本周新增：从JSON加载关卡 ======================
+void LoadLevel(int level) {
     bricks.clear();
-    for (int row = 0; row < 5; row++) {
-        for (int col = 0; col < 8; col++) {
-            bricks.emplace_back(
-                Vector2{50.0f + col * 90.0f, 100.0f + row * 35.0f},
-                85, 25,
-                row < colors.size() ? colors[row] : BLUE
-            );
+    string filename = "levels/level" + to_string(level) + ".json";
+    
+    // 默认关卡配置
+    json defaultConfig = R"({
+        "version": 1,
+        "name": "默认关卡",
+        "ball_speed": 3.0,
+        "bricks": {
+            "rows": 5,
+            "cols": 8,
+            "width": 85,
+            "height": 25,
+            "offset_x": 50,
+            "offset_y": 100,
+            "layout": [
+                [1,1,1,1,1,1,1,1],
+                [1,1,1,1,1,1,1,1],
+                [1,1,1,1,1,1,1,1],
+                [1,1,1,1,1,1,1,1],
+                [1,1,1,1,1,1,1,1]
+            ],
+            "color_map": {"1": "red"}
+        }
+    })"_json;
+    
+    json config = LoadJSONWithFallback(filename, defaultConfig);
+    
+    float ballSpeed = config.value("ball_speed", 3.0f);
+    int rows = config["bricks"].value("rows", 5);
+    int cols = config["bricks"].value("cols", 8);
+    g_brickWidth = config["bricks"].value("width", 85.0f);
+    g_brickHeight = config["bricks"].value("height", 25.0f);
+    float offsetX = config["bricks"].value("offset_x", 50.0f);
+    float offsetY = config["bricks"].value("offset_y", 100.0f);
+    
+    auto layout = config["bricks"]["layout"];
+    auto colorMap = config["bricks"]["color_map"];
+    
+    unordered_map<int, Color> brickColors;
+    for (auto& [key, value] : colorMap.items()) {
+        int type = stoi(key);
+        brickColors[type] = GetColorFromName(value.get<string>());
+    }
+    
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            int type = layout[i][j];
+            if (type != 0) {
+                Color color = brickColors.count(type) ? brickColors[type] : BLUE;
+                float x = offsetX + j * (g_brickWidth + 5);
+                float y = offsetY + i * (g_brickHeight + 10);
+                bricks.emplace_back(Vector2{x, y}, g_brickWidth, g_brickHeight, color, type);
+            }
         }
     }
-    UpdateGrid(bricks); // 初始化网格
-}
-
-void ResetGame() {
-    InitBricks();
+    
+    // 重置球和板子
     ball.position = {400, 300};
-    ball.velocity = {3, -3};
+    ball.velocity = {ballSpeed, -ballSpeed};
     paddle1.position = {350, 550};
     paddle1.ResetWidth();
     paddle2.position = {350, 30};
     paddle2.ResetWidth();
     if (powerUp) { delete powerUp; powerUp = nullptr; }
-    InitParticlePool(); // 重置粒子池
+    InitParticlePool();
+    
+    currentState.currentLevel = level;
+    UpdateGrid(bricks);
+    
+    TraceLog(LOG_INFO, "加载关卡 %d: %s", level, config["name"].get<string>().c_str());
+}
+// ======================================================================
+
+void ResetGame() {
+    LoadLevel(currentState.currentLevel);
     currentState.score = 0;
     currentState.lives = 3;
     currentState.gameOver = false;
@@ -446,112 +647,145 @@ void ResetGame() {
 void UpdateHostLogic() {
     MEASURE_BLOCK_START();
     float dt = GetFrameTime();
-    if (IsKeyDown(KEY_A)) paddle1.MoveLeft(5.0f);
-    if (IsKeyDown(KEY_D)) paddle1.MoveRight(5.0f);
-
-    // 异步加载触发逻辑
-    if (IsKeyPressed(KEY_L)) {
-        lock_guard<mutex> lock(g_stateMutex);
-        if (g_loadState == LoadState::IDLE) {
-            g_loadState = LoadState::LOADING;
-            g_loadFuture = async(launch::async, AsyncLoadLargeResource);
-        }
+    
+    // 编辑模式切换
+    if (IsKeyPressed(KEY_E)) {
+        ToggleEditingMode();
+        currentState.editingMode = g_editingMode;
     }
+    
+    // 编辑模式更新
+    UpdateEditingMode(bricks, g_brickWidth, g_brickHeight);
+    
+    if (!g_editingMode) {
+        if (IsKeyDown(KEY_A)) paddle1.MoveLeft(5.0f);
+        if (IsKeyDown(KEY_D)) paddle1.MoveRight(5.0f);
 
-    // 检查异步加载完成
-    {
-        lock_guard<mutex> lock(g_stateMutex);
-        if (g_loadState == LoadState::LOADING) {
-            if (g_loadFuture.wait_for(chrono::seconds(0)) == future_status::ready) {
-                g_newBrickColors = g_loadFuture.get();
-                g_loadState = LoadState::DONE;
-                InitBricks(g_newBrickColors);
+        // 异步加载触发
+        if (IsKeyPressed(KEY_L)) {
+            lock_guard<mutex> lock(g_stateMutex);
+            if (g_loadState == LoadState::IDLE) {
+                g_loadState = LoadState::LOADING;
+                g_loadFuture = async(launch::async, AsyncLoadLargeResource);
             }
         }
-    }
 
-    ball.Move();
-    ball.BounceEdge(SCREEN_WIDTH, SCREEN_HEIGHT);
-
-    // 球与板子碰撞
-    if (CheckCollisionCircleRec(ball.position, ball.radius,
-        {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
-        ball.velocity.y = -fabs(ball.velocity.y);
-        ball.position.y = paddle1.position.y - ball.radius - 1;
-        CreateParticles(ball.position, BLUE, 5);
-    }
-
-    if (CheckCollisionCircleRec(ball.position, ball.radius,
-        {paddle2.position.x, paddle2.position.y, paddle2.width, paddle2.height})) {
-        ball.velocity.y = fabs(ball.velocity.y);
-        ball.position.y = paddle2.position.y + paddle2.height + ball.radius + 1;
-        CreateParticles(ball.position, GREEN, 5);
-    }
-
-    // 球与砖块碰撞（使用优化后的网格法）
-    CheckBallBrickCollision(ball, bricks, currentState.score);
-    UpdateGrid(bricks); // 每帧更新网格
-
-    // 道具更新
-    if (powerUp && powerUp->active) {
-        powerUp->Update();
-        if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
-            {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
-            if (powerUp->type == 1) paddle1.Widen();
-            else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
-            else if (powerUp->type == 3) currentState.lives++;
-            powerUp->active = false;
-            CreateParticles(powerUp->position, powerUp->color, 15);
-            powerUp = nullptr;
-        } else if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
-            {paddle2.position.x, paddle2.position.y, paddle2.width, paddle2.height})) {
-            if (powerUp->type == 1) paddle2.Widen();
-            else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
-            else if (powerUp->type == 3) currentState.lives++;
-            powerUp->active = false;
-            CreateParticles(powerUp->position, powerUp->color, 15);
-            powerUp = nullptr;
-        } else if (powerUp->position.y > SCREEN_HEIGHT) {
-            powerUp->active = false;
-            powerUp = nullptr;
+        // 检查异步加载完成
+        {
+            lock_guard<mutex> lock(g_stateMutex);
+            if (g_loadState == LoadState::LOADING) {
+                if (g_loadFuture.wait_for(chrono::seconds(0)) == future_status::ready) {
+                    g_newBrickColors = g_loadFuture.get();
+                    g_loadState = LoadState::DONE;
+                    // 重新加载当前关卡，使用新颜色
+                    LoadLevel(currentState.currentLevel);
+                }
+            }
         }
-    }
 
-    // 随机掉落道具
-    static uniform_int_distribution<int> dist(1, 5);
-    static uniform_int_distribution<int> typeDist(1, 3);
-    if (dist(rng) == 1 && !powerUp && !bricks.empty()) {
-        // 从已打碎的砖块位置掉落
+        ball.Move();
+        ball.BounceEdge(SCREEN_WIDTH, SCREEN_HEIGHT);
+
+        // 球与板子碰撞
+        if (CheckCollisionCircleRec(ball.position, ball.radius,
+            {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
+            ball.velocity.y = -fabs(ball.velocity.y);
+            ball.position.y = paddle1.position.y - ball.radius - 1;
+            CreateParticles(ball.position, BLUE, 5);
+        }
+
+        if (CheckCollisionCircleRec(ball.position, ball.radius,
+            {paddle2.position.x, paddle2.position.y, paddle2.width, paddle2.height})) {
+            ball.velocity.y = fabs(ball.velocity.y);
+            ball.position.y = paddle2.position.y + paddle2.height + ball.radius + 1;
+            CreateParticles(ball.position, GREEN, 5);
+        }
+
+        // 球与砖块碰撞
+        CheckBallBrickCollision(ball, bricks, currentState.score);
+        UpdateGrid(bricks);
+
+        // 道具更新
+        if (powerUp && powerUp->active) {
+            powerUp->Update();
+            if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
+                {paddle1.position.x, paddle1.position.y, paddle1.width, paddle1.height})) {
+                if (powerUp->type == 1) paddle1.Widen();
+                else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
+                else if (powerUp->type == 3) currentState.lives++;
+                powerUp->active = false;
+                CreateParticles(powerUp->position, powerUp->color, 15);
+                powerUp = nullptr;
+            } else if (CheckCollisionCircleRec(powerUp->position, powerUp->radius,
+                {paddle2.position.x, paddle2.position.y, paddle2.width, paddle2.height})) {
+                if (powerUp->type == 1) paddle2.Widen();
+                else if (powerUp->type == 2) ball.velocity.x *= 1.2f, ball.velocity.y *= 1.2f;
+                else if (powerUp->type == 3) currentState.lives++;
+                powerUp->active = false;
+                CreateParticles(powerUp->position, powerUp->color, 15);
+                powerUp = nullptr;
+            } else if (powerUp->position.y > SCREEN_HEIGHT) {
+                powerUp->active = false;
+                powerUp = nullptr;
+            }
+        }
+
+        // 随机掉落道具
+        static uniform_int_distribution<int> dist(1, 5);
+        static uniform_int_distribution<int> typeDist(1, 3);
+        if (dist(rng) == 1 && !powerUp && !bricks.empty()) {
+            for (const auto& brick : bricks) {
+                if (!brick.active) {
+                    powerUp = new PowerUp(brick.position, typeDist(rng));
+                    break;
+                }
+            }
+        }
+
+        UpdateParticles(dt);
+
+        // 球出界
+        if (ball.position.y > SCREEN_HEIGHT || ball.position.y < 0) {
+            currentState.lives--;
+            if (currentState.lives <= 0) {
+                currentState.gameOver = true;
+            } else {
+                ball.position = {400, 300};
+                ball.velocity = {3, -3};
+                paddle1.ResetWidth();
+                paddle2.ResetWidth();
+            }
+        }
+
+        // 检查通关
+        bool allBricksBroken = true;
         for (const auto& brick : bricks) {
-            if (!brick.active) {
-                powerUp = new PowerUp(brick.position, typeDist(rng));
+            if (brick.active) {
+                allBricksBroken = false;
                 break;
             }
         }
-    }
-
-    UpdateParticles(dt);
-
-    if (ball.position.y > SCREEN_HEIGHT || ball.position.y < 0) {
-        currentState.lives--;
-        if (currentState.lives <= 0) {
-            currentState.gameOver = true;
-        } else {
-            ball.position = {400, 300};
-            ball.velocity = {3, -3};
-            paddle1.ResetWidth();
-            paddle2.ResetWidth();
+        
+        if (allBricksBroken) {
+            if (currentState.currentLevel < TOTAL_LEVELS) {
+                // 自动加载下一关
+                currentState.currentLevel++;
+                LoadLevel(currentState.currentLevel);
+                // 自动保存进度
+                SaveData save;
+                save.currentLevel = currentState.currentLevel;
+                save.score = currentState.score;
+                save.lives = currentState.lives;
+                SaveGame(save);
+            } else {
+                currentState.victory = true;
+                // 通关后删除存档
+                if (fs::exists("save.json")) {
+                    fs::remove("save.json");
+                }
+            }
         }
     }
-
-    bool allBricksBroken = true;
-    for (const auto& brick : bricks) {
-        if (brick.active) {
-            allBricksBroken = false;
-            break;
-        }
-    }
-    if (allBricksBroken) currentState.victory = true;
 
     // 更新同步状态
     currentState.ballX = ball.position.x;
@@ -575,8 +809,11 @@ void UpdateHostLogic() {
 void UpdateClientLogic() {
     MEASURE_BLOCK_START();
     float dt = GetFrameTime();
-    if (IsKeyDown(KEY_A)) paddle2.MoveLeft(5.0f);
-    if (IsKeyDown(KEY_D)) paddle2.MoveRight(5.0f);
+    
+    if (!currentState.editingMode) {
+        if (IsKeyDown(KEY_A)) paddle2.MoveLeft(5.0f);
+        if (IsKeyDown(KEY_D)) paddle2.MoveRight(5.0f);
+    }
 
     UpdateParticles(dt);
 
@@ -597,6 +834,14 @@ void InterpolateState(double now) {
     ball.position.x = lastSnapshot.state.ballX * (1-t) + nextSnapshot.state.ballX * t;
     ball.position.y = lastSnapshot.state.ballY * (1-t) + nextSnapshot.state.ballY * t;
     paddle1.position.x = lastSnapshot.state.paddle1X * (1-t) + nextSnapshot.state.paddle1X * t;
+    
+    // 关卡切换时重新加载
+    if (nextSnapshot.state.currentLevel != currentState.currentLevel && isHost == false) {
+        LoadLevel(nextSnapshot.state.currentLevel);
+    }
+    
+    // 同步编辑模式状态
+    g_editingMode = nextSnapshot.state.editingMode;
 
     if (nextSnapshot.state.powerUpActive) {
         if (!powerUp) {
@@ -613,6 +858,7 @@ void InterpolateState(double now) {
     currentState.lives = nextSnapshot.state.lives;
     currentState.gameOver = nextSnapshot.state.gameOver;
     currentState.victory = nextSnapshot.state.victory;
+    currentState.currentLevel = nextSnapshot.state.currentLevel;
 }
 
 void ProcessNetworkEvents() {
@@ -655,7 +901,24 @@ int main() {
     }
     atexit(enet_deinitialize);
 
-    InitParticlePool(); // 初始化粒子池
+    InitParticlePool();
+    
+    // 本周新增：启动时检测存档并询问是否继续
+    SaveData saveData;
+    if (SaveExists()) {
+        cout << "检测到存档，是否继续上次的进度？(y/n): ";
+        char choice;
+        cin >> choice;
+        if (choice == 'y' || choice == 'Y') {
+            saveData = LoadSave();
+            cout << "已加载存档：第" << saveData.currentLevel << "关，分数：" << saveData.score << endl;
+        } else {
+            // 删除旧存档
+            if (fs::exists("save.json")) {
+                fs::remove("save.json");
+            }
+        }
+    }
 
     cout << "Select mode:" << endl;
     cout << "1. Host (run first)" << endl;
@@ -670,7 +933,12 @@ int main() {
         address.port = PORT;
         host = enet_host_create(&address, 1, 2, 0, 0);
         cout << "Host started, waiting for client..." << endl;
-        ResetGame();
+        
+        // 加载存档中的关卡
+        currentState.currentLevel = saveData.currentLevel;
+        currentState.score = saveData.score;
+        currentState.lives = saveData.lives;
+        LoadLevel(currentState.currentLevel);
     } else {
         host = enet_host_create(nullptr, 1, 2, 0, 0);
         ENetAddress address;
@@ -685,7 +953,7 @@ int main() {
         return 1;
     }
 
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Co-op + Performance Optimized");
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Co-op + Data Persistence");
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
@@ -722,7 +990,8 @@ int main() {
 
         DrawText(TextFormat("Score: %d", currentState.score), 20, 15, 20, WHITE);
         DrawText(TextFormat("Lives: %d", currentState.lives), 680, 15, 20, GREEN);
-        DrawText("A/D Move | R Reset | L Load Resource", 250, 15, 20, LIGHTGRAY);
+        DrawText(TextFormat("Level: %d", currentState.currentLevel), 350, 15, 20, YELLOW);
+        DrawText("A/D Move | R Reset | L Load | E Edit", 200, 40, 16, LIGHTGRAY);
 
         ball.Draw();
         paddle1.Draw();
@@ -730,6 +999,16 @@ int main() {
         for (const auto& brick : bricks) brick.Draw();
         if (powerUp) powerUp->Draw();
         DrawParticles();
+
+        // 编辑模式提示
+        if (g_editingMode) {
+            DrawText("编辑模式：左键添加 | 右键删除 | S保存", 250, 570, 20, YELLOW);
+            // 绘制鼠标位置的砖块预览
+            Vector2 mouse = GetMousePosition();
+            float x = floor(mouse.x / g_brickWidth) * g_brickWidth;
+            float y = floor(mouse.y / g_brickHeight) * g_brickHeight;
+            DrawRectangle(x, y, g_brickWidth, g_brickHeight, Color{255, 255, 255, 100});
+        }
 
         // 加载中提示
         {
@@ -744,13 +1023,23 @@ int main() {
         } else if (currentState.gameOver) {
             DrawText("GAME OVER | Press R to restart", 220, 300, 30, RED);
         } else if (currentState.victory) {
-            DrawText("YOU WIN! | Press R to restart", 240, 300, 30, GREEN);
+            DrawText("YOU WIN ALL LEVELS!", 240, 300, 30, GREEN);
         }
 
         EndDrawing();
         MEASURE_BLOCK_END(g_stats.drawTime);
 
-        PrintPerformanceStats(); // 打印性能统计
+        PrintPerformanceStats();
+    }
+
+    // 退出时自动保存进度
+    if (isHost && !currentState.gameOver && !currentState.victory) {
+        SaveData save;
+        save.currentLevel = currentState.currentLevel;
+        save.score = currentState.score;
+        save.lives = currentState.lives;
+        SaveGame(save);
+        cout << "已自动保存进度" << endl;
     }
 
     // 资源清理
