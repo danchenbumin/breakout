@@ -1,17 +1,20 @@
 cmake_minimum_required(VERSION 3.10)
 project(breakout)
 
-# 只编译main.cpp，杜绝旧文件重复定义内存崩溃
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 查找raylib
+find_package(raylib REQUIRED)
+
+# 查找ENet
+find_library(ENET_LIBRARY enet REQUIRED)
+find_path(ENET_INCLUDE_DIR enet/enet.h REQUIRED)
+
+# 添加nlohmann/json头文件目录（把json.hpp放在项目根目录的include文件夹里）
+include_directories(${PROJECT_SOURCE_DIR}/include)
+
 add_executable(breakout main.cpp)
 
-# 链接本地安装好的raylib
-find_package(raylib REQUIRED)
-target_link_libraries(breakout raylib)
-
-# pkg-config链接ENet网络库
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(ENET REQUIRED libenet)
-target_include_directories(breakout PRIVATE ${ENET_INCLUDE_DIRS})
-target_link_libraries(breakout ${ENET_LIBRARIES})
-
-target_compile_features(breakout PRIVATE cxx_std_17)
+target_link_libraries(breakout raylib ${ENET_LIBRARY})
+file(COPY ${PROJECT_SOURCE_DIR}/levels DESTINATION ${PROJECT_BINARY_DIR})
