@@ -1,17 +1,30 @@
-# 编译生成的可执行文件/中间文件
-game
-main
+# ====================== C++ 编译产物 ======================
 *.o
-*.out
+*.obj
+*.a
+*.so
+*.dll
 *.exe
+*.out
+build/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
 
-# VSCode配置（只保留核心编译配置）
-.vscode/*
-!.vscode/tasks.json
-!.vscode/launch.json
+# ====================== IDE 配置文件 ======================
+.vscode/
+.idea/
+*.user
+*.VC.db
+*.VC.VC.opendb
 
-# 临时/日志/缓存文件
-*.tmp
+# ====================== 游戏运行时生成的文件 ======================
+save.json
+levels/custom.json
 *.log
-*~
+*.tmp
+
+# ====================== 系统文件 ======================
 .DS_Store
+Thumbs.db
