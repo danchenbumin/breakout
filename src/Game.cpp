@@ -1,8 +1,12 @@
 #include "Game.h"
 #include <fstream>
 
-// 构造函数：使用成员初始化列表
-Game::Game() 
+/**
+ * @brief 构造函数 — 使用成员初始化列表设置默认值
+ * @details paddle 初始化为(0,0)位置，100×20大小；
+ *          初始状态为 MENU，球粘在球拍上等待发射。
+ */
+Game::Game()
     : paddle(0, 0, 100, 20),
       score(0),
       lives(3),
@@ -13,20 +17,31 @@ Game::Game()
 {
 }
 
-// 游戏初始化
+/**
+ * @brief 初始化游戏 — 加载配置文件并重置到初始状态
+ * @details 先调用 LoadConfig() 加载关卡配置，再调用 ResetGame() 初始化所有对象
+ */
 void Game::Init() {
     LoadConfig("config.json");
     ResetGame();
 }
 
+/**
+ * @brief 加载JSON配置文件
+ * @param configPath JSON配置文件路径（相对于上一级目录）
+ * @details 从项目根目录读取 config.json 并解析
+ */
 void Game::LoadConfig(const std::string& configPath) {
-    // 改成从项目根目录加载config.json
     std::ifstream f("../" + configPath);
     json config = json::parse(f);
 }
 
-// 游戏状态更新
-void Game::Update() {
+/**
+ * @brief 主游戏更新循环 — 每帧调用一次
+ * @details 状态机驱动：MENU等待发射 → PLAYING处理输入/碰撞/道具 →
+ *          PAUSED暂停 → GAMEOVER/VICTORY等待重开。
+ *          全局快捷键：R键重置、P键暂停/继续。
+ */
     deltaTime = GetFrameTime(); // 获取每帧的时间差
     // 全局按键：R键重开
     if (IsKeyPressed(KEY_R)) {
@@ -108,8 +123,11 @@ void Game::Update() {
     }
 }
 
-// 游戏画面绘制（全英文UI）
-void Game::Draw() {
+/**
+ * @brief 游戏画面绘制 — 每帧调用一次
+ * @details 绘制顺序：背景→边界墙→顶部UI栏→游戏对象→粒子→状态提示。
+ *          所有UI文字使用英文，符合课程要求。
+ */
     BeginDrawing();
     ClearBackground({20, 20, 30, 255}); // 深灰黑背景
 
@@ -150,7 +168,10 @@ void Game::Draw() {
     EndDrawing();
 }
 
-// 游戏资源释放
+/**
+ * @brief 释放游戏资源 — 清空所有动态容器
+ * @details 在程序退出前调用，清理砖块、球、道具、粒子列表
+ */
 void Game::Shutdown() {
     bricks.clear();
     balls.clear();
@@ -158,8 +179,11 @@ void Game::Shutdown() {
     particles.clear();
 }
 
-// 重置游戏状态
-void Game::ResetGame() {
+/**
+ * @brief 重置游戏状态 — 清空所有对象并恢复初始配置
+ * @details 生成5行8列彩色砖块（红→橙→黄→绿→蓝），
+ *          球回到球拍上等待发射，分数/生命/道具/粒子全部重置。
+ */
     bricks.clear();
     float brickWidth = 85;
     float brickHeight = 25;
@@ -191,8 +215,13 @@ void Game::ResetGame() {
     slowEffectRemainingTime = 0.0f;
 }
 
-// 碰撞检测
-void Game::CheckCollision() {
+/**
+ * @brief 碰撞检测 — 检测球与球拍、球与砖块的碰撞
+ * @details 球拍碰撞：反转Y速度，球位置修正避免卡入球拍。
+ *          砖块碰撞：使用圆与矩形碰撞算法(CheckCollisionCircleRec)，
+ *          击中后标记砖块非活跃、加分10、生成粒子、30%概率掉落道具。
+ *          每次只处理一个碰撞（break跳出内层循环）。
+ */
     // 所有球与球拍碰撞
     for (auto& ball : balls) {
         if (CheckCollisionCircleRec(ball.position, ball.radius, paddle.rect)) {
@@ -222,8 +251,11 @@ void Game::CheckCollision() {
     }
 }
 
-// 检查游戏状态（胜利/失败）
-void Game::CheckGameState() {
+/**
+ * @brief 检查游戏胜负状态
+ * @details 所有球掉出屏幕→扣一条命→球重置到球拍上。
+ *          命归零→GAMEOVER。所有砖块消灭→VICTORY。
+ */
     // 检查所有球是否都掉出屏幕
     bool allBallsLost = true;
     for (auto& ball : balls) {
@@ -260,8 +292,14 @@ void Game::CheckGameState() {
     }
 }
 
-// 粒子相关函数
-void Game::SpawnParticles(float x, float y, Color color, int count) {
+/**
+ * @brief 生成粒子 — 砖块破碎或道具拾取时的视觉反馈
+ * @param x 生成位置X
+ * @param y 生成位置Y
+ * @param color 粒子颜色（通常取砖块颜色）
+ * @param count 粒子数量
+ * @details 每个粒子随机速度发射，生命0.5秒后自动淡出删除
+ */
     for (int i = 0; i < count; i++) {
         Particle p;
         p.pos = {x, y};
@@ -272,7 +310,11 @@ void Game::SpawnParticles(float x, float y, Color color, int count) {
     }
 }
 
-void Game::UpdateParticles() {
+/**
+ * @brief 更新所有粒子状态
+ * @details 逐帧更新粒子位置，生命归零的粒子从列表中移除。
+ *          速度乘以deltaTime*60保持帧率无关的运动。
+ */
     for (auto it = particles.begin(); it != particles.end();) {
         it->pos.x += it->vel.x * deltaTime * 60;
         it->pos.y += it->vel.y * deltaTime * 60;
@@ -285,13 +327,20 @@ void Game::UpdateParticles() {
     }
 }
 
-// 道具相关函数
-void Game::SpawnPowerUp(float x, float y) {
+/**
+ * @brief 生成道具 — 随机选择道具类型
+ * @param x 掉落起始X坐标
+ * @param y 掉落起始Y坐标
+ * @details 从3种道具类型中随机选择，加入powerUps列表
+ */
     PowerUpType type = static_cast<PowerUpType>(rand() % 3);
     powerUps.emplace_back(x, y, type);
 }
 
-void Game::UpdatePowerUps() {
+/**
+ * @brief 更新所有道具位置
+ * @details 道具向下掉落，移出屏幕底部（y>600）自动删除
+ */
     for (auto it = powerUps.begin(); it != powerUps.end();) {
         it->Update(deltaTime);
         // 道具掉出屏幕则移除
@@ -303,7 +352,11 @@ void Game::UpdatePowerUps() {
     }
 }
 
-void Game::CheckPowerUpCollision() {
+/**
+ * @brief 检测道具与球拍碰撞 — 触发道具效果
+ * @details 使用 CheckCollisionCircleRec 检测，
+ *          碰撞后调用 effect->Apply() 触发效果并从列表中移除道具
+ */
     for (auto it = powerUps.begin(); it != powerUps.end();) {
         if (CheckCollisionCircleRec(it->position, 15, paddle.rect)) {
             it->effect->Apply(*this);
@@ -314,8 +367,11 @@ void Game::CheckPowerUpCollision() {
     }
 }
 
-// 道具效果接口
-void Game::SpawnExtraBalls(int count) {
+/**
+ * @brief 生成额外球 — 多球道具效果实现
+ * @param count 额外生成的球数量
+ * @details 基于当前第一个球的位置，速度随机扰动后生成新球加入balls列表
+ */
     if (balls.empty()) return;
     Ball baseBall = balls[0];
     for (int i = 0; i < count; i++) {
@@ -324,7 +380,13 @@ void Game::SpawnExtraBalls(int count) {
     }
 }
 
-void Game::SlowAllBalls(float factor, float duration) {
+/**
+ * @brief 减速所有球 — 减速道具效果实现
+ * @param factor 速度缩放因子（0.5=减半）
+ * @param duration 效果持续时间（秒）
+ * @details slowEffectRemainingTime 开始倒计时，
+ *          到期后 Update() 中自动将球速度恢复为原速度÷factor
+ */
     for (auto& ball : balls) {
         ball.speed.x *= factor;
         ball.speed.y *= factor;
