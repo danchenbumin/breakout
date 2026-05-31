@@ -1,47 +1,71 @@
 #include "PowerUp.h"
-#include "Game.h" // 新增：引入Game的完整定义
+#include "Game.h" // 引入Game的完整定义以调用Paddle/Ball接口
 
-// 加长板效果
+// ====================== 道具效果实现类（工厂模式） ======================
+
+/**
+ * @brief 加长板效果 — 球拍宽度临时增加
+ */
 class ExtendPaddleEffect : public PowerUpEffect {
 private:
-    float extraWidth;
-    float duration;
+    float extraWidth; ///< 额外增加的宽度
+    float duration;   ///< 效果持续时间（秒）
 public:
-    ExtendPaddleEffect(float extraWidth, float duration) 
+    ExtendPaddleEffect(float extraWidth, float duration)
         : extraWidth(extraWidth), duration(duration) {}
 
+    /**
+     * @brief 应用效果：调用 Game::GetPaddle().Extend()
+     */
     void Apply(Game& game) override {
         game.GetPaddle().Extend(extraWidth, duration);
     }
 };
 
-// 多球效果
+/**
+ * @brief 多球效果 — 额外生成2个球
+ */
 class MultiBallEffect : public PowerUpEffect {
 private:
-    int extraBalls;
+    int extraBalls; ///< 额外生成的球数量
 public:
     MultiBallEffect(int extraBalls) : extraBalls(extraBalls) {}
 
+    /**
+     * @brief 应用效果：调用 Game::SpawnExtraBalls()
+     */
     void Apply(Game& game) override {
         game.SpawnExtraBalls(extraBalls);
     }
 };
 
-// 减速球效果
+/**
+ * @brief 减速球效果 — 所有球速度临时减半
+ */
 class SlowBallEffect : public PowerUpEffect {
 private:
-    float speedFactor;
-    float duration;
+    float speedFactor; ///< 速度缩放因子
+    float duration;    ///< 效果持续时间（秒）
 public:
-    SlowBallEffect(float speedFactor, float duration) 
+    SlowBallEffect(float speedFactor, float duration)
         : speedFactor(speedFactor), duration(duration) {}
 
+    /**
+     * @brief 应用效果：调用 Game::SlowAllBalls()
+     */
     void Apply(Game& game) override {
         game.SlowAllBalls(speedFactor, duration);
     }
 };
 
-// 道具工厂函数
+/**
+ * @brief 道具效果工厂函数 — 根据类型创建对应效果对象
+ * @param type 道具类型枚举
+ * @return unique_ptr 管理的效果对象
+ * @details PADDLE_EXTEND→加长40像素/5秒，
+ *          MULTI_BALL→额外2个球，
+ *          SLOW_BALL→速度×0.5/持续5秒
+ */
 std::unique_ptr<PowerUpEffect> CreatePowerUpEffect(PowerUpType type) {
     switch (type) {
         case PowerUpType::PADDLE_EXTEND:
@@ -62,10 +86,19 @@ PowerUp::PowerUp(float x, float y, PowerUpType type) {
     effect = CreatePowerUpEffect(type);
 }
 
+/**
+ * @brief 更新道具位置
+ * @param dt 帧时间差（秒）
+ * @details 道具以100像素/秒匀速向下掉落
+ */
 void PowerUp::Update(float dt) {
-    position.y += 100 * dt; // 道具下落速度
+    position.y += 100 * dt;
 }
 
+/**
+ * @brief 绘制道具
+ * @details 30×30方块+白色边框，颜色按类型：加长板=蓝色，多球=黄色，减速球=紫色
+ */
 void PowerUp::Draw() const {
     Color color;
     switch (type) {
